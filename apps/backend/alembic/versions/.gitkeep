@@ -1,0 +1,2 @@
+# First migration (core tables) lands in Slice 2. `alembic upgrade head` is a
+# successful no-op until then.

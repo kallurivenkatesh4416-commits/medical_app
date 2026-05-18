@@ -19,6 +19,8 @@ env/
 .coverage
 coverage.xml
 htmlcov/
+*.db
+*.sqlite3
 *.egg-info/
 dist/
 build/
