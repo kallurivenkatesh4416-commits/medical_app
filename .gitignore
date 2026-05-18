@@ -1,0 +1,57 @@
+# --- Secrets / env (NEVER commit) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*-service-account.json
+firebase-*.json
+
+# --- Python / FastAPI backend ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# --- Node / React dashboard / shared-types ---
+node_modules/
+.pnpm-store/
+dist/
+.vite/
+*.tsbuildinfo
+coverage/
+
+# --- Flutter / Dart mobile ---
+apps/mobile/.dart_tool/
+apps/mobile/.flutter-plugins
+apps/mobile/.flutter-plugins-dependencies
+apps/mobile/build/
+apps/mobile/.pub-cache/
+apps/mobile/.pub/
+apps/mobile/ios/Pods/
+apps/mobile/android/.gradle/
+apps/mobile/android/local.properties
+*.iml
+
+# --- Docker / local infra ---
+.localstack/
+pgdata/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+
+# --- Claude Code workspace ---
+.claude/settings.local.json

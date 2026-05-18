@@ -1,0 +1,44 @@
+# Local Setup
+
+> Goal: a new developer runs the system locally in under 30 minutes. Updated every
+> slice. AWS deploy (TLS, rate limiting, WAF, EC2/RDS/S3) is documented here later
+> as a separate task ("local now, AWS later").
+
+## Prerequisites
+
+- Docker + Docker Compose
+- Python 3.11+ (backend dev outside Docker, optional)
+- Node 20+ (dashboard / shared-types)
+- Flutter stable (mobile) — optional for backend-only work
+
+## Steps
+
+```bash
+cp .env.example .env          # fill local values; never commit .env
+docker compose up --build     # postgres + backend + localstack(S3) + mailhog
+```
+
+Then:
+
+- Backend health: `GET http://localhost:8000/healthz` and `/readyz`
+- API docs: `http://localhost:8000/docs`
+- Mailhog UI: `http://localhost:8025`
+
+## Backend dev (without Docker)
+
+```bash
+cd apps/backend
+python -m venv .venv
+. .venv/Scripts/activate        # Windows PowerShell: .venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+alembic upgrade head
+uvicorn app.main:app --reload
+pytest
+```
+
+## Required env vars
+
+See `.env.example` (annotated). Provider keys (Twilio/FCM/AWS) are only needed from
+the slice that uses them; default `PROVIDER_MODE=stub` needs no external accounts.
+
+_Status: Slice 1 covers backend + infra. Dashboard/mobile steps added per slice._
