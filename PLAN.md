@@ -166,13 +166,17 @@ document — explicitly **not** in this repo, not stubbed, not committed.
 
 ### Canonical UX copy (commit 1 → `docs/ux-copy.md`)
 
+> Reverted on review to brief §2.1 exact wording (the earlier Addition 4 phrasing
+> used the word "diagnose"). No diagnose/diagnosis/diagnostic anywhere.
+
 - **`DISCLAIMER_FULL`** (once during onboarding, required acknowledgment): "This app
-  does not diagnose or treat illness. It alerts qualified medical staff, records
-  health information, and supports emergency coordination. Final clinical decisions
-  remain with the registered doctor. In a life-threatening situation, call 108 or
-  112 immediately."
-- **`DISCLAIMER_SHORT`** (footer on home/vitals/records): "Not a diagnostic tool.
-  Call 108 in a life-threatening emergency."
+  does not replace emergency hospital care. It alerts qualified medical staff,
+  records health information, and supports emergency coordination. Final clinical
+  decisions remain with the registered doctor. In a life-threatening situation,
+  call 108 / 112 immediately."
+- **`DISCLAIMER_SHORT`** (footer on home/vitals/records): "This app does not replace
+  emergency hospital care. In a life-threatening situation, call 108 / 112
+  immediately."
 - **`OFFLINE_EMERGENCY_BUTTON`** (splash/login, always visible): "Call 108"
 - **Connected-devices copy** (Settings, Slice 11): "Wearable integration (Google
   Health Connect on Android, Apple HealthKit on iOS) is planned for Phase 2. The MVP

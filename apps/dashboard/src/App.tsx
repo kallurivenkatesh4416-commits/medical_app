@@ -4,7 +4,10 @@ export default function App() {
       <h1>Emergency Health — Doctor &amp; Admin Dashboard</h1>
       <p>Skeleton (Slice 1). Live alert feed, case view, and admin KPIs land in later slices.</p>
       <p>
-        <small>Not a diagnostic tool. Call 108 in a life-threatening emergency.</small>
+        <small>
+          This app does not replace emergency hospital care. In a life-threatening
+          situation, call 108 / 112 immediately.
+        </small>
       </p>
     </main>
   );
