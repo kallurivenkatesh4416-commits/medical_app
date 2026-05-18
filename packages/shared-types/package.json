@@ -1,0 +1,14 @@
+{
+  "name": "@med/shared-types",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Canonical enums + OpenAPI-generated types shared by dashboard and mobile",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}
