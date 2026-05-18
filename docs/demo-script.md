@@ -14,8 +14,9 @@ patient arrives.
 
 - "Wearable integration (Google Health Connect on Android, Apple HealthKit on iOS)
   is planned for Phase 2. The MVP supports manual vitals entry by clinical staff."
-- "This app does not diagnose or treat illness — final clinical decisions remain
-  with the registered doctor."
+- "This app does not replace emergency hospital care. In a life-threatening
+  situation, call 108 / 112 immediately. Final clinical decisions remain with the
+  registered doctor."
 
 ## Run (grows per slice)
 

@@ -13,10 +13,18 @@ const String disclaimerShort =
 /// The only hardcoded fallback number (brief §2.2). Reachable offline.
 final Uri kCall108 = Uri(scheme: 'tel', path: '108');
 
+/// Injectable so widget tests can verify the call without a real dialer.
+typedef UriLauncher = Future<bool> Function(Uri uri);
+
+Future<bool> defaultLauncher(Uri uri) =>
+    launchUrl(uri, mode: LaunchMode.externalApplication);
+
 void main() => runApp(const MedEmergencyApp());
 
 class MedEmergencyApp extends StatelessWidget {
-  const MedEmergencyApp({super.key});
+  const MedEmergencyApp({super.key, this.launcher = defaultLauncher});
+
+  final UriLauncher launcher;
 
   @override
   Widget build(BuildContext context) {
@@ -30,19 +38,36 @@ class MedEmergencyApp extends StatelessWidget {
           labelLarge: TextStyle(fontSize: 22),
         ),
       ),
-      home: const SplashScreen(),
+      home: SplashScreen(launcher: launcher),
     );
   }
 }
 
 /// Splash carries a working offline "Call 108" action even when not logged in
-/// (brief §2.2 / §14): one tap places the call via the native dialer.
+/// (brief §2.2 / §14). For this emergency fallback we launch directly (no
+/// canLaunchUrl gate that could silently no-op) and surface any failure
+/// visibly so the user is never left with a dead button.
 class SplashScreen extends StatelessWidget {
-  const SplashScreen({super.key});
+  const SplashScreen({super.key, this.launcher = defaultLauncher});
 
-  Future<void> _call108() async {
-    if (await canLaunchUrl(kCall108)) {
-      await launchUrl(kCall108);
+  final UriLauncher launcher;
+
+  Future<void> _call108(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    var ok = false;
+    try {
+      ok = await launcher(kCall108);
+    } catch (_) {
+      ok = false;
+    }
+    if (!ok) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            tr('Could not open the dialer. Please dial 108 directly.'),
+          ),
+        ),
+      );
     }
   }
 
@@ -77,7 +102,7 @@ class SplashScreen extends StatelessWidget {
                         backgroundColor: Colors.red,
                         textStyle: const TextStyle(fontSize: 22),
                       ),
-                      onPressed: _call108,
+                      onPressed: () => _call108(context),
                       child: Text(tr('Call 108')),
                     ),
                   ),
