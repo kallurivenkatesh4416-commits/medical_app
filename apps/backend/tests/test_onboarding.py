@@ -7,6 +7,7 @@ from sqlmodel import Session, select
 
 from app.enums import AuditAction, ConsentType, Role
 from app.models.audit import AuditLog
+from app.models.auth import RefreshToken
 from app.models.project import Project
 from app.models.resident import Resident
 from app.models.user import User
@@ -326,6 +327,49 @@ def test_new_key_after_success_is_not_replayed(
     )
     assert again.status_code == 409
     assert "access_token" not in again.json()
+
+
+def test_replay_after_account_closure_is_refused(
+    client: TestClient, project: Project, session: Session
+) -> None:
+    tok = _register_token(client, "+15556660015")
+    headers = {"Authorization": f"Bearer {tok}", "Idempotency-Key": "ck"}
+    payload = _payload(str(project.id))
+
+    created = client.post(
+        "/api/v1/onboarding/complete", json=payload, headers=headers
+    )
+    assert created.status_code == 200
+    access = created.json()["access_token"]
+
+    closed = client.patch(
+        "/api/v1/me/consents/data_storage",
+        json={"granted": False},
+        headers={"Authorization": f"Bearer {access}"},
+    )
+    assert closed.status_code == 200
+    assert closed.json()["account_closed"] is True
+
+    # Exact replay (same token + key + body) must NOT resurrect the closed
+    # account or mint a fresh refresh token.
+    replay = client.post(
+        "/api/v1/onboarding/complete", json=payload, headers=headers
+    )
+    assert replay.status_code == 403
+    assert replay.json()["error"]["code"] == "account_inactive"
+    assert "access_token" not in replay.json()
+
+    user = session.exec(
+        select(User).where(User.phone == "+15556660015")
+    ).first()
+    assert user.deleted_at is not None
+    live = session.exec(
+        select(RefreshToken).where(
+            RefreshToken.user_id == user.id,
+            RefreshToken.revoked_at.is_(None),  # type: ignore[union-attr]
+        )
+    ).all()
+    assert live == []
 
 
 def test_idempotency_same_key_different_body_conflicts(

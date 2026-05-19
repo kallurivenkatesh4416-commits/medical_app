@@ -66,6 +66,10 @@
   only for the SAME verified phone AND the SAME body; any mismatch is a
   `idempotency_key_conflict` (409) — a key cannot be reused by another subject
   to obtain that subject's session.
+- `login_user` centrally refuses inactive/soft-deleted accounts
+  (`account_inactive` 403). This upholds the closure invariant: once
+  `data_storage` is revoked, no path (login, onboarding, idempotent replay)
+  can mint fresh credentials for the closed account.
 
 ## Open questions — `[NEEDS_LEGAL_REVIEW]`
 

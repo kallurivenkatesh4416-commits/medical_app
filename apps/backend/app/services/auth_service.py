@@ -161,6 +161,11 @@ def consume_otp(
 def login_user(
     session: Session, *, user: User, from_ip: str | None
 ) -> tuple[str, str]:
+    # Central guard: no token-issuing path (login, onboarding, idempotent
+    # replay) may resurrect a closed/inactive account. data_storage revocation
+    # soft-deletes the user, so replay after closure is refused here.
+    if not user.is_active or user.deleted_at is not None:
+        raise AuthError(403, "account_inactive", "Account is not active.")
     access, refresh = _issue_tokens(session, user)
     record_audit(
         session,
