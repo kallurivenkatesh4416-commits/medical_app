@@ -87,4 +87,24 @@
   marker cannot be double-inserted (SQLite ignores the lock; Postgres
   enforces it).
 
+### Slice 6 review #2 fixes (concurrency + continuity)
+
+- **Concurrency-safe outbox:** delivery now atomically claims each attempt
+  (`queued → sending` via a conditional UPDATE) before calling the provider.
+  A concurrent original-delivery and lost-response replay can no longer both
+  send the same attempt — the loser of the claim simply skips. A claimed-but-
+  unfinished row (provider crash) stays `sending`; a stuck-claim reaper is a
+  documented Slice 12 hardening item (losing one page is safer than double-
+  paging in an emergency).
+- **Duty-phone scoping:** `_contact_phone_for` now filters the on-call lookup
+  by the case's `project_id` **and** the recipient's role, so overlapping/
+  stale schedule rows in another project or role cannot supply the wrong
+  number.
+- **Post-confirmation continuity:** the mobile pending record now persists the
+  server `caseId` once created. If the app is killed after creation but before
+  acknowledgment, `restore()` resumes the **confirmed** path — it does *not*
+  re-send (the case exists) but restarts the 60s countdown so the fallback
+  sheet / status polling still fire. The record is cleared on acknowledgment
+  or the first fallback tap.
+
 - Still Slice 7: case lifecycle (`acknowledged`→…→`closed`), vitals, notes.

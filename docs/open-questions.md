@@ -57,6 +57,18 @@
 
 ## Technical hardening backlog (non-blocking, `[HARDENING]`)
 
+### `[HARDENING]` Stuck-claim reaper for notification outbox
+- **What:** delivery atomically claims an attempt (`queued → sending`) before
+  calling the provider so concurrent delivery/replay cannot double-send. If a
+  process dies after claiming but before writing `sent`/`failed`, the row is
+  stuck in `sending` and is never retried (only `queued` rows resume).
+- **Why deliberate:** in an emergency, dropping one duplicate page is safer
+  than double-paging; the crash window is small.
+- **Plan:** a reaper that re-queues `sending` rows older than N seconds (with
+  an attempt counter / cap), plus the Postgres-backed concurrency test below.
+  Fits the Slice 12 hardening pass.
+- **Surfaced in:** Slice 6 review #2 / `emergency_service._claim_attempt`.
+
 ### `[HARDENING]` Postgres-backed concurrency test for refresh rotation
 - **What:** `rotate_refresh` relies on `SELECT ... FOR UPDATE` row locking. The
   lock path only exists on Postgres; local/CI tests run on SQLite (which

@@ -2,7 +2,7 @@
 on-call resolution, 60s backup escalation, and the mobile fallback sheet."""
 
 import uuid
-from datetime import timedelta
+from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
 from sqlalchemy import event
@@ -19,7 +19,12 @@ from app.enums import (
 )
 from app.models.audit import AuditLog
 from app.models.base import utcnow
-from app.models.emergency import CaseEvent, EmergencyCase, NotificationAttempt
+from app.models.emergency import (
+    CaseEvent,
+    DeviceToken,
+    EmergencyCase,
+    NotificationAttempt,
+)
 from app.models.on_call import OnCallSchedule
 from app.models.project import Project
 from app.models.resident import Resident
@@ -675,6 +680,86 @@ def test_security_desk_gets_minimal_payload_only_when_opted_in(
     # notification_attempts never persists a body / symptoms / history.
     assert not hasattr(desk_attempts[0], "body")
     assert desk_attempts[0].error is None
+
+
+def test_delivery_claim_prevents_concurrent_double_send(
+    session: Session, project: Project, make_user, monkeypatch
+) -> None:
+    """A concurrent delivery (e.g. original request + lost-response replay)
+    must not both call the provider for the same queued attempt."""
+    resident_user = User(
+        project_id=project.id,
+        phone="+15559992001",
+        role=Role.RESIDENT.value,
+        full_name="Race Resident",
+    )
+    session.add(resident_user)
+    session.commit()
+    resident = Resident(
+        user_id=resident_user.id,
+        project_id=project.id,
+        flat_villa_number="C-1",
+        dob=date(1950, 1, 1),
+        gender="female",
+    )
+    session.add(resident)
+    doctor = make_user(Role.DOCTOR, phone="+15559992002")
+    session.add(
+        DeviceToken(
+            project_id=project.id,
+            user_id=doctor.id,
+            platform="web",
+            push_token="race-token",
+            last_seen_at=utcnow(),
+        )
+    )
+    session.commit()
+    case = EmergencyCase(
+        project_id=project.id,
+        resident_id=resident.id,
+        created_by_user_id=resident_user.id,
+        assigned_doctor_id=doctor.id,
+        status=CaseStatus.ALERTED.value,
+        symptom_codes=[],
+    )
+    session.add(case)
+    session.commit()
+    session.add(
+        NotificationAttempt(
+            project_id=project.id,
+            case_id=case.id,
+            channel=NotificationChannel.FCM.value,
+            recipient_id=doctor.id,
+            status=NotificationStatus.QUEUED.value,
+            attempted_at=utcnow(),
+        )
+    )
+    session.commit()
+
+    sends: list[int] = []
+
+    class Reentrant:
+        def send_push(self, *, token: str, title: str, body: str) -> str:
+            sends.append(1)
+            # Simulate a concurrent deliverer arriving mid-send.
+            emergency_service._deliver_pending(session, case=case)
+            return "race-ref"
+
+        def send_sms(self, *, to: str, body: str) -> str:
+            return "sms"
+
+        def place_voice_call(self, *, to: str, twiml_url: str) -> str:
+            return "voice"
+
+    monkeypatch.setattr(
+        emergency_service, "get_notification_gateway", lambda: Reentrant()
+    )
+    emergency_service._deliver_pending(session, case=case)
+
+    assert sends == [1]  # claimed once; the reentrant pass found nothing queued
+    attempts = session.exec(select(NotificationAttempt)).all()
+    assert len(attempts) == 1
+    assert attempts[0].status == NotificationStatus.SENT.value
 
 
 def test_case_status_is_owner_scoped_and_reflects_ack(

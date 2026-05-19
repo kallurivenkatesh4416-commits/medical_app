@@ -56,6 +56,9 @@ class NotificationChannel(StrEnum):
 
 class NotificationStatus(StrEnum):
     QUEUED = "queued"
+    # Transient claim: one deliverer atomically moves queued -> sending before
+    # calling the provider, so a concurrent replay/resume cannot double-send.
+    SENDING = "sending"
     SENT = "sent"
     DELIVERED = "delivered"
     FAILED = "failed"

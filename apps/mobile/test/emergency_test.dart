@@ -105,10 +105,10 @@ void main() {
     c.dispose();
   });
 
-  testWidgets('Restore resumes a persisted alert with the same key',
+  testWidgets('Restore resumes an unconfirmed alert with the same key',
       (tester) async {
     final store = InMemoryPendingAlertStore();
-    await store.save('persisted-key');
+    await store.save(const PendingAlert(idempotencyKey: 'persisted-key'));
     final keys = <String>[];
     final c = _controller(
       sender: (key) async {
@@ -124,7 +124,60 @@ void main() {
     await tester.pump();
 
     expect(keys, ['persisted-key']);
-    expect(await store.load(), isNull); // cleared once confirmed
+    // Confirmed: the case id is now persisted so a later kill can resume the
+    // countdown/fallback (not cleared until acknowledged or a fallback tap).
+    final saved = await store.load();
+    expect(saved?.idempotencyKey, 'persisted-key');
+    expect(saved?.caseId, 'case-r');
+    c.dispose();
+  });
+
+  testWidgets('Restore of a CONFIRMED alert resumes fallback without re-sending',
+      (tester) async {
+    final store = InMemoryPendingAlertStore();
+    await store.save(
+      const PendingAlert(idempotencyKey: 'k', caseId: 'case-confirmed'),
+    );
+    var senderCalls = 0;
+    final c = _controller(
+      sender: (_) async {
+        senderCalls++;
+        return const AlertResult(ok: true, caseId: 'case-confirmed');
+      },
+      ack: (_) async => false,
+      numbers: (_) async =>
+          const FallbackNumbers(emergency108: '108', emergency112: '112'),
+      store: store,
+      ackWindow: const Duration(milliseconds: 50),
+    );
+
+    await _pump(tester, c); // initState() -> restore() (confirmed path)
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 60));
+    await tester.pumpAndSettle();
+
+    expect(senderCalls, 0); // the case already exists; must not re-send
+    expect(find.text('Call 108'), findsOneWidget); // countdown still fired
+    c.dispose();
+  });
+
+  testWidgets('Acknowledged within the window clears the persisted alert',
+      (tester) async {
+    final store = InMemoryPendingAlertStore();
+    final c = _controller(
+      sender: (_) async => const AlertResult(ok: true, caseId: 'case-ack'),
+      ack: (_) async => true,
+      store: store,
+      ackWindow: const Duration(milliseconds: 50),
+    );
+
+    await _pump(tester, c);
+    await tester.tap(find.widgetWithText(FilledButton, 'I Need Medical Help'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 60));
+    await tester.pump();
+
+    expect(await store.load(), isNull);
     c.dispose();
   });
 

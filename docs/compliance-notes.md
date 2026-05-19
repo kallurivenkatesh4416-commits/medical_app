@@ -156,6 +156,19 @@
   misconfigured schedule cannot route an alert (or the security-desk minimal
   payload) to the wrong project or role.
 
+### Slice 6 review #2 fixes
+
+- Notification delivery is concurrency-safe: an atomic `queued → sending`
+  claim makes the provider call at-most-once per attempt, so a lost-response
+  replay cannot double-page a doctor/security desk.
+- Duty-phone resolution for SMS/voice is scoped to the case's project and the
+  recipient's role, closing a path where stale cross-project/role schedule
+  data could direct an alert (incl. the security-desk minimal payload) to an
+  unintended number.
+- The mobile pending record stores only an opaque idempotency key and the
+  server case id (no PII/PHI); it is cleared on acknowledgment or the first
+  fallback tap.
+
 ## Open questions — `[NEEDS_LEGAL_REVIEW]`
 
 1. `[NEEDS_LEGAL_REVIEW]` DPDP cross-border data: acceptable AWS S3 region for

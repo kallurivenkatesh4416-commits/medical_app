@@ -24,6 +24,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
@@ -334,6 +335,31 @@ def _deliver_pending(session: Session, *, case: EmergencyCase) -> None:
         )
 
 
+def _claim_attempt(session: Session, attempt: NotificationAttempt) -> bool:
+    """Atomically move this attempt ``queued -> sending``. Returns True iff
+    THIS caller won the claim. A conditional UPDATE (only matches while still
+    ``queued``) makes the original delivery and a concurrent replay/resume
+    mutually exclusive, so the provider is called at most once per attempt.
+
+    The provider crash window (claimed but never finalised) leaves a row stuck
+    in ``sending``; a stuck-claim reaper is a documented hardening item
+    (docs/open-questions.md) — losing one notification is the safer failure
+    than double-paging in an emergency."""
+    result = session.execute(
+        update(NotificationAttempt)
+        .where(
+            NotificationAttempt.id == attempt.id,
+            NotificationAttempt.status == NotificationStatus.QUEUED.value,
+        )
+        .values(status=NotificationStatus.SENDING.value)
+    )
+    session.commit()
+    claimed = result.rowcount == 1
+    if claimed:
+        session.refresh(attempt)
+    return claimed
+
+
 def _deliver_one(
     session: Session,
     *,
@@ -342,6 +368,9 @@ def _deliver_one(
     gateway,  # noqa: ANN001 - NotificationGateway Protocol
     resident: Resident | None,
 ) -> None:
+    # Concurrency-safe: only the winner of the atomic claim sends.
+    if not _claim_attempt(session, attempt):
+        return
     if attempt.recipient_id is None:
         attempt.status = NotificationStatus.FAILED.value
         attempt.error = "no_active_doctor"
@@ -365,7 +394,7 @@ def _deliver_one(
                 token=token.push_token, title=_ALERT_TITLE, body=_ALERT_BODY
             )
         elif attempt.channel == NotificationChannel.SMS.value:
-            phone = _contact_phone_for(session, user)
+            phone = _contact_phone_for(session, user, project_id=case.project_id)
             if not phone:
                 raise _ChannelSkip("no_contact_phone")
             body = (
@@ -375,7 +404,7 @@ def _deliver_one(
             )
             attempt.provider_ref = gateway.send_sms(to=phone, body=body)
         elif attempt.channel == NotificationChannel.VOICE.value:
-            phone = _contact_phone_for(session, user)
+            phone = _contact_phone_for(session, user, project_id=case.project_id)
             if not phone:
                 raise _ChannelSkip("no_contact_phone")
             attempt.provider_ref = gateway.place_voice_call(
@@ -405,14 +434,20 @@ def _push_token_for(session: Session, user: User) -> DeviceToken | None:
     ).first()
 
 
-def _contact_phone_for(session: Session, user: User) -> str | None:
+def _contact_phone_for(
+    session: Session, user: User, *, project_id: uuid.UUID
+) -> str | None:
     """Duty line for SMS/voice — an active on-call ``contact_phone`` for this
-    user if one exists, else the user's own phone."""
+    user **scoped to the case's project and the user's role**, else the user's
+    own phone. Scoping stops a stale/overlapping schedule in another project
+    or role from supplying the wrong duty line."""
     now = utcnow()
     row = session.exec(
         select(OnCallSchedule)
         .where(
             OnCallSchedule.user_id == user.id,
+            OnCallSchedule.project_id == project_id,
+            OnCallSchedule.role == user.role,
             OnCallSchedule.starts_at <= now,
             OnCallSchedule.ends_at > now,
             OnCallSchedule.contact_phone.is_not(None),  # type: ignore[union-attr]

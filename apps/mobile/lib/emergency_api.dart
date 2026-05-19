@@ -16,22 +16,29 @@ class FilePendingAlertStore implements PendingAlertStore {
   final File _file;
 
   @override
-  Future<String?> load() async {
+  Future<PendingAlert?> load() async {
     try {
       if (!await _file.exists()) return null;
-      final raw = jsonDecode(await _file.readAsString());
-      final key = (raw as Map)['idempotency_key'];
-      return key is String && key.isNotEmpty ? key : null;
+      final raw = jsonDecode(await _file.readAsString()) as Map;
+      final key = raw['idempotency_key'];
+      if (key is! String || key.isEmpty) return null;
+      final caseId = raw['case_id'];
+      return PendingAlert(
+        idempotencyKey: key,
+        caseId: caseId is String && caseId.isNotEmpty ? caseId : null,
+      );
     } catch (_) {
       return null;
     }
   }
 
   @override
-  Future<void> save(String idempotencyKey) async {
+  Future<void> save(PendingAlert pending) async {
     try {
-      await _file
-          .writeAsString(jsonEncode({'idempotency_key': idempotencyKey}));
+      await _file.writeAsString(jsonEncode({
+        'idempotency_key': pending.idempotencyKey,
+        'case_id': pending.caseId,
+      }));
     } catch (_) {
       // Best-effort durability; a write failure must not block the alert.
     }

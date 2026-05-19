@@ -62,6 +62,8 @@ export type NotificationChannel =
 
 export const NotificationStatus = {
   QUEUED: "queued",
+  /** Transient claim — a deliverer holds the attempt while calling the provider. */
+  SENDING: "sending",
   SENT: "sent",
   DELIVERED: "delivered",
   FAILED: "failed",

@@ -42,25 +42,33 @@ typedef AckChecker = Future<bool> Function(String caseId);
 typedef FallbackNumbersFetcher = Future<FallbackNumbers> Function(String caseId);
 typedef FallbackRecorder = Future<void> Function(String caseId, String channel);
 
-/// Durable store for the in-flight alert's idempotency key. Persisted on the
-/// tap and kept until the alert reaches the server (a case id is returned),
-/// so an app kill while offline does not lose the alert or let the resumed
-/// retry create a duplicate. A disk-backed implementation lives in
+/// The in-flight alert persisted across app restarts: the idempotency key
+/// (so a resumed retry never creates a duplicate case) and, once the server
+/// confirms, the `caseId` (so the 60s fallback countdown + status polling
+/// survive an app kill *after* creation but before acknowledgment).
+class PendingAlert {
+  const PendingAlert({required this.idempotencyKey, this.caseId});
+
+  final String idempotencyKey;
+  final String? caseId;
+}
+
+/// Durable store for the [PendingAlert]. A disk-backed implementation lives in
 /// `emergency_api.dart`; tests use the in-memory one.
 abstract class PendingAlertStore {
-  Future<String?> load();
-  Future<void> save(String idempotencyKey);
+  Future<PendingAlert?> load();
+  Future<void> save(PendingAlert pending);
   Future<void> clear();
 }
 
 class InMemoryPendingAlertStore implements PendingAlertStore {
-  String? _value;
+  PendingAlert? _value;
 
   @override
-  Future<String?> load() async => _value;
+  Future<PendingAlert?> load() async => _value;
 
   @override
-  Future<void> save(String idempotencyKey) async => _value = idempotencyKey;
+  Future<void> save(PendingAlert pending) async => _value = pending;
 
   @override
   Future<void> clear() async => _value = null;
@@ -123,30 +131,48 @@ class EmergencyController extends ChangeNotifier {
     idempotencyKey ??= _keyFactory();
     // Persist intent BEFORE the first send so an app kill mid-offline can
     // resume with the same key (no duplicate case on the server).
-    await store.save(idempotencyKey!);
-    _begin();
+    await store.save(PendingAlert(idempotencyKey: idempotencyKey!));
+    _beginSend();
   }
 
-  /// Resume an alert that was persisted but never confirmed (e.g. the app was
-  /// killed while offline). Reuses the stored key so the server dedupes.
+  /// Resume an alert persisted before an app kill. If it was never confirmed,
+  /// re-send with the same key (server dedupes). If it WAS confirmed (a case
+  /// id is stored), don't re-send — just restart the ack countdown so the
+  /// fallback sheet / status polling continuity survives the kill.
   Future<void> restore() async {
     if (phase != AlertPhase.idle || idempotencyKey != null) return;
     final saved = await store.load();
     if (saved == null) return;
-    idempotencyKey = saved;
-    _begin();
+    idempotencyKey = saved.idempotencyKey;
+    if (saved.caseId != null) {
+      caseId = saved.caseId;
+      _resumeConfirmed();
+    } else {
+      _beginSend();
+    }
   }
 
-  void _begin() {
+  void _startAckCountdown() {
+    _ackTimer?.cancel();
+    _ackTimer = Timer(ackWindow, _onAckWindowElapsed);
+  }
+
+  void _beginSend() {
     phase = AlertPhase.sending;
     fallbackVisible = false;
     _safeNotify();
-
-    // The 60s countdown starts now regardless of send success.
-    _ackTimer?.cancel();
-    _ackTimer = Timer(ackWindow, _onAckWindowElapsed);
-
+    // The countdown starts now regardless of send success.
+    _startAckCountdown();
     _attemptSend();
+  }
+
+  void _resumeConfirmed() {
+    // The case already exists server-side; do not re-send. Keep the safety
+    // net: a fresh countdown still surfaces the fallback sheet if no ack.
+    phase = AlertPhase.sent;
+    fallbackVisible = false;
+    _safeNotify();
+    _startAckCountdown();
   }
 
   Future<void> _attemptSend() async {
@@ -163,8 +189,11 @@ class EmergencyController extends ChangeNotifier {
       phase = AlertPhase.sent;
       _retryTimer?.cancel();
       _retryTimer = null;
-      // Confirmed on the server — the key is no longer needed for dedupe.
-      await store.clear();
+      // Confirmed: persist the case id so a later app kill can resume the
+      // countdown/fallback, not just the (now-redundant) send.
+      await store.save(
+        PendingAlert(idempotencyKey: idempotencyKey!, caseId: result.caseId),
+      );
     } else {
       phase = AlertPhase.retrying;
       _retryTimer ??= Timer.periodic(retryInterval, (_) => _attemptSend());
@@ -182,10 +211,13 @@ class EmergencyController extends ChangeNotifier {
       }
     }
     if (_disposed) return;
-    if (!acknowledged) {
-      fallbackVisible = true;
-      _safeNotify();
+    if (acknowledged) {
+      // Resolved by a responder — nothing left to resume after a kill.
+      await store.clear();
+      return;
     }
+    fallbackVisible = true;
+    _safeNotify();
   }
 
   Future<FallbackNumbers> loadFallbackNumbers() async {
@@ -208,6 +240,9 @@ class EmergencyController extends ChangeNotifier {
     } catch (_) {
       // Recording is best-effort; the call itself must still go through.
     }
+    // The resident is now reaching help directly — the alert is resolved
+    // from the app's standpoint, so stop resuming it after a kill.
+    await store.clear();
   }
 
   void _safeNotify() {
