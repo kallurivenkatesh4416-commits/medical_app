@@ -8,6 +8,7 @@ users to exist (seeded). Refresh tokens are opaque, stored hashed, single-use
 import uuid
 from datetime import timedelta
 
+from sqlalchemy import update
 from sqlmodel import Session, select
 
 from app.config import get_settings
@@ -189,8 +190,9 @@ def rotate_refresh(
     if token is None:
         raise AuthError(401, "invalid_refresh", "Invalid refresh token.")
 
-    if token.revoked_at is not None:
-        # A revoked token being presented again = theft/replay. Kill the family.
+    def _flag_reuse() -> None:
+        # A revoked/already-rotated token presented again = theft/replay or a
+        # concurrent double-spend. Kill the whole family.
         _revoke_all_user_refresh(session, token.user_id)
         record_audit(
             session,
@@ -199,6 +201,9 @@ def rotate_refresh(
             from_ip=from_ip,
             purpose="auth.refresh",
         )
+
+    if token.revoked_at is not None:
+        _flag_reuse()
         raise AuthError(401, "refresh_reuse_detected", "Session revoked. Please log in again.")
 
     if token.expires_at < _now():
@@ -208,9 +213,18 @@ def rotate_refresh(
     if user is None or not user.is_active or user.deleted_at is not None:
         raise AuthError(403, "account_inactive", "Account is not active.")
 
-    token.revoked_at = _now()
-    session.add(token)
+    # Atomically claim the token: exactly one concurrent request can flip
+    # revoked_at from NULL. The loser gets rowcount 0 and is treated as reuse,
+    # preserving the single-use guarantee without a DB-specific row lock.
+    result = session.execute(
+        update(RefreshToken)
+        .where(RefreshToken.id == token.id, RefreshToken.revoked_at.is_(None))
+        .values(revoked_at=_now())
+    )
     session.commit()
+    if result.rowcount != 1:
+        _flag_reuse()
+        raise AuthError(401, "refresh_reuse_detected", "Session revoked. Please log in again.")
 
     access, new_refresh = _issue_tokens(session, user)
     record_audit(

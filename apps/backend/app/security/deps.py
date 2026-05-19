@@ -7,6 +7,7 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlmodel import Session
 
+from app.config import get_settings
 from app.db import engine
 from app.enums import NON_PHI_ROLES, Role
 from app.models.user import User
@@ -21,9 +22,13 @@ def get_db() -> Iterator[Session]:
 
 
 def client_ip(request: Request) -> str | None:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    # X-Forwarded-For is client-controlled unless the app is actually behind a
+    # trusted proxy. Only honour it when explicitly configured, else the audit
+    # log would record attacker-chosen IPs.
+    if get_settings().trust_forwarded_for:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
     return request.client.host if request.client else None
 
 

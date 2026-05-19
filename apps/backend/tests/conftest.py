@@ -2,9 +2,12 @@
 
 import os
 
-os.environ.setdefault("DATABASE_URL", "sqlite://")
-os.environ.setdefault("PROVIDER_MODE", "stub")
-os.environ.setdefault("APP_ENV", "local")
+# Force an in-memory SQLite test DB UNCONDITIONALLY. The autouse cleanup below
+# deletes every mapped table, so we must never inherit a real DATABASE_URL
+# (a dev/CI value pointed at a non-test DB would be wiped).
+os.environ["DATABASE_URL"] = "sqlite://"
+os.environ["PROVIDER_MODE"] = "stub"
+os.environ["APP_ENV"] = "local"
 
 import uuid
 from collections.abc import Iterator
@@ -18,6 +21,11 @@ from app.enums import Role
 from app.main import create_app
 from app.models.project import Project
 from app.models.user import User
+
+# Hard guard: refuse to run destructive fixtures against anything but SQLite.
+assert engine.url.get_backend_name() == "sqlite", (
+    f"tests must run on SQLite, got {engine.url.get_backend_name()}"
+)
 
 
 @pytest.fixture(scope="session", autouse=True)

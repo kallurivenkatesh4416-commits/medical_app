@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     otp_length: int = 6
     otp_max_attempts: int = 5
 
+    # Only trust X-Forwarded-For when the app actually sits behind a trusted
+    # reverse proxy (set true in that deployment). Default false so clients
+    # cannot spoof the audited source IP.
+    trust_forwarded_for: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:
