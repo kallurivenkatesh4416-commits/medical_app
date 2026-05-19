@@ -40,3 +40,31 @@ def decode_access_token(token: str) -> dict[str, Any]:
     if payload.get("type") != TokenType.ACCESS.value:
         raise TokenError("not an access token")
     return payload
+
+
+def create_registration_token(*, phone: str) -> str:
+    settings = get_settings()
+    now = datetime.now(tz=UTC)
+    payload: dict[str, Any] = {
+        "sub": phone,
+        "type": TokenType.REGISTRATION.value,
+        "jti": uuid.uuid4().hex,
+        "iat": now,
+        "exp": now + timedelta(seconds=settings.registration_ttl_seconds),
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+def decode_registration_token(token: str) -> str:
+    """Return the verified phone, or raise TokenError."""
+    settings = get_settings()
+    try:
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+    except jwt.PyJWTError as exc:
+        raise TokenError(str(exc)) from exc
+    if payload.get("type") != TokenType.REGISTRATION.value:
+        raise TokenError("not a registration token")
+    phone = payload.get("sub")
+    if not phone:
+        raise TokenError("missing subject")
+    return phone

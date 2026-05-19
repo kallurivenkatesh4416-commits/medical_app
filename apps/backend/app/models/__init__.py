@@ -6,10 +6,24 @@ from sqlalchemy import event
 
 from app.models.audit import AuditLog
 from app.models.auth import OtpCode, RefreshToken
+from app.models.consent import Consent
+from app.models.emergency_contact import EmergencyContact
+from app.models.medical_profile import MedicalProfile
 from app.models.project import Project
+from app.models.resident import Resident
 from app.models.user import User
 
-__all__ = ["AuditLog", "OtpCode", "RefreshToken", "Project", "User"]
+__all__ = [
+    "AuditLog",
+    "OtpCode",
+    "RefreshToken",
+    "Consent",
+    "EmergencyContact",
+    "MedicalProfile",
+    "Project",
+    "Resident",
+    "User",
+]
 
 
 class AuditLogImmutableError(RuntimeError):

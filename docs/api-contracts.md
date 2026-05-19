@@ -24,6 +24,13 @@
 | POST | `/api/v1/auth/refresh` | 2 | rotates refresh (single-use, reuse-detected) |
 | POST | `/api/v1/auth/logout` | 2 | revokes the refresh token (204) |
 | GET | `/api/v1/auth/me` | 2 | current user (Bearer access token) |
+| POST | `/api/v1/auth/otp/verify` | 3 | now returns either a token pair OR `registration_required` + `registration_token` |
+| GET | `/api/v1/projects` | 3 | project lookup (names only; registration token) |
+| POST | `/api/v1/onboarding/complete` | 3 | atomic resident self-registration → token pair |
+| GET | `/api/v1/me/profile` | 3 | resident's own profile (PHI; audited) |
+| GET | `/api/v1/me/consents` | 3 | resident's consents |
+| PATCH | `/api/v1/me/consents/{consent_type}` | 3 | grant/revoke; `data_storage`=false closes account |
+| GET | `/api/v1/residents/{id}/profile` | 3 | staff view (doctor/nurse/ops; PHI-role-blocked; consent-gated; audited) |
 
 Auth: `Authorization: Bearer <access>`. Access tokens are short-lived JWTs;
 refresh tokens are opaque, stored hashed, rotated on every use.

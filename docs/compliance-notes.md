@@ -33,6 +33,25 @@
 - Append-only audit enforced two ways: app-level SQLAlchemy guard + Postgres
   rule (migration `0001`). `[NEEDS_LEGAL_REVIEW]` item #3 (retention) still open.
 
+## Slice 3 implementation notes (onboarding / consent / profile)
+
+- Onboarding is one transaction (account + profile + contacts + consents +
+  audit) — partial registrations cannot occur.
+- Every consent grant/revoke/re-consent writes `audit_log`; every PHI profile
+  read (self or staff) writes `PATIENT_PROFILE_READ`.
+- Consent is enforced live: `assert_consent` reads current state, so a
+  revocation blocks the very next access. Non-emergency staff profile view is
+  gated by `emergency_share_with_doctor`; the emergency override is a later
+  slice and is **not** silently assumed here.
+- Revoking `data_storage` triggers account closure: user soft-deleted
+  (`deleted_at`), `is_active=false`, all refresh tokens revoked. Hard purge is
+  the future 30-day job (DPDP) — `[NEEDS_LEGAL_REVIEW]` item #6 still open.
+- `CONSENT_POLICY_VERSION` is recorded per consent row; re-consent adopts the
+  current version. The forced-re-consent trigger is `[NEEDS_LEGAL_REVIEW]`
+  item #8 (unchanged — implementation does not decide it).
+- Staff are tenant-isolated: a resident outside the actor's project returns
+  404 (no existence leak).
+
 ## Open questions — `[NEEDS_LEGAL_REVIEW]`
 
 1. `[NEEDS_LEGAL_REVIEW]` DPDP cross-border data: acceptable AWS S3 region for

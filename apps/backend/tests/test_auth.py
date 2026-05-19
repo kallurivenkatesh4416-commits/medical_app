@@ -70,15 +70,20 @@ def test_expired_code_rejected(
     assert resp.json()["error"]["code"] == "invalid_otp"
 
 
-def test_verified_phone_without_account_cannot_login(client: TestClient) -> None:
+def test_verified_phone_without_account_is_offered_registration(
+    client: TestClient,
+) -> None:
     client.post("/api/v1/auth/otp/request", json={"phone": "+15559990000"})
     req = client.post("/api/v1/auth/otp/request", json={"phone": "+15559990000"})
     code = req.json()["dev_otp"]
     resp = client.post(
         "/api/v1/auth/otp/verify", json={"phone": "+15559990000", "code": code}
     )
-    assert resp.status_code == 403
-    assert resp.json()["error"]["code"] == "registration_required"
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["registration_required"] is True
+    assert body["registration_token"]
+    assert body["access_token"] is None
 
 
 def test_refresh_rotation_and_reuse_detection(

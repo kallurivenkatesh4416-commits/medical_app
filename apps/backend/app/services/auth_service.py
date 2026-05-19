@@ -94,9 +94,11 @@ def _issue_tokens(session: Session, user: User) -> tuple[str, str]:
     return access, raw_refresh
 
 
-def verify_otp(
+def consume_otp(
     session: Session, *, phone: str, code: str, from_ip: str | None
-) -> tuple[str, str, User]:
+) -> User | None:
+    """Validate + consume an OTP. Returns the active User, or None when the
+    phone is verified but has no account yet (caller offers registration)."""
     otp = session.exec(
         select(OtpCode)
         .where(OtpCode.phone == phone, OtpCode.consumed_at.is_(None))  # type: ignore[union-attr]
@@ -150,17 +152,15 @@ def verify_otp(
         select(User).where(User.phone == phone, User.deleted_at.is_(None))  # type: ignore[union-attr]
     ).first()
     if user is None or not user.is_active:
-        record_audit(
-            session,
-            action=AuditAction.OTP_VERIFY_FAILED,
-            from_ip=from_ip,
-            purpose="auth.otp_verify",
-            meta={**fail_meta, "reason": "no_active_user"},
-        )
-        # Self-registration is Slice 3; for now a verified phone with no user
-        # cannot log in.
-        raise AuthError(403, "registration_required", "No active account for this number.")
+        # Verified phone, no account: not a failure — onboarding (Slice 3) will
+        # create the resident and audit RESIDENT_REGISTERED.
+        return None
+    return user
 
+
+def login_user(
+    session: Session, *, user: User, from_ip: str | None
+) -> tuple[str, str]:
     access, refresh = _issue_tokens(session, user)
     record_audit(
         session,
@@ -170,7 +170,7 @@ def verify_otp(
         from_ip=from_ip,
         purpose="auth.login",
     )
-    return access, refresh, user
+    return access, refresh
 
 
 def _revoke_all_user_refresh(session: Session, user_id: uuid.UUID) -> None:

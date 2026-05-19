@@ -26,6 +26,7 @@ def record_audit(
     from_ip: str | None = None,
     purpose: str | None = None,
     meta: dict | None = None,
+    commit: bool = True,
 ) -> AuditLog:
     entry = AuditLog(
         action=action.value,
@@ -38,6 +39,11 @@ def record_audit(
         meta=meta or {},
     )
     session.add(entry)
-    session.commit()
-    session.refresh(entry)
+    if commit:
+        # Default: audit is its own durable write.
+        session.commit()
+        session.refresh(entry)
+    else:
+        # Caller batches this into a larger atomic transaction (e.g. onboarding).
+        session.flush()
     return entry

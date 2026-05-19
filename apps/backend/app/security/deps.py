@@ -11,7 +11,11 @@ from app.config import get_settings
 from app.db import engine
 from app.enums import NON_PHI_ROLES, Role
 from app.models.user import User
-from app.security.jwt import TokenError, decode_access_token
+from app.security.jwt import (
+    TokenError,
+    decode_access_token,
+    decode_registration_token,
+)
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -52,6 +56,18 @@ def get_current_user(
     if user is None or not user.is_active or user.deleted_at is not None:
         raise HTTPException(status_code=401, detail="Inactive or unknown account")
     return user
+
+
+def get_registration_phone(
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> str:
+    """Verified phone from a short-lived registration token (onboarding only)."""
+    if creds is None or not creds.credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        return decode_registration_token(creds.credentials)
+    except TokenError as exc:
+        raise HTTPException(status_code=401, detail="Invalid registration token") from exc
 
 
 def require_roles(*allowed: Role):

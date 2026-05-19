@@ -9,6 +9,7 @@ from sqlmodel import Session
 from app.config import get_settings
 from app.models.user import User
 from app.security.deps import client_ip, get_current_user, get_db
+from app.security.jwt import create_registration_token
 from app.services import auth_service
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -50,6 +51,16 @@ class OtpRequestOut(BaseModel):
     dev_otp: str | None = None
 
 
+class OtpVerifyOut(BaseModel):
+    # Either a token pair (existing account) or a registration grant (new
+    # phone -> onboarding). Exactly one side is populated.
+    registration_required: bool = False
+    access_token: str | None = None
+    refresh_token: str | None = None
+    token_type: str = "bearer"
+    registration_token: str | None = None
+
+
 @router.post("/otp/request", response_model=OtpRequestOut)
 def otp_request(
     body: OtpRequestIn,
@@ -63,16 +74,24 @@ def otp_request(
     return OtpRequestOut(sent=True, dev_otp=code if expose else None)
 
 
-@router.post("/otp/verify", response_model=TokenPair)
+@router.post("/otp/verify", response_model=OtpVerifyOut)
 def otp_verify(
     body: OtpVerifyIn,
     request: Request,
     session: Session = Depends(get_db),
-) -> TokenPair:
-    access, refresh, _user = auth_service.verify_otp(
-        session, phone=body.phone, code=body.code, from_ip=client_ip(request)
+) -> OtpVerifyOut:
+    ip = client_ip(request)
+    user = auth_service.consume_otp(
+        session, phone=body.phone, code=body.code, from_ip=ip
     )
-    return TokenPair(access_token=access, refresh_token=refresh)
+    if user is None:
+        # Verified phone, no account yet -> hand back a registration grant.
+        return OtpVerifyOut(
+            registration_required=True,
+            registration_token=create_registration_token(phone=body.phone),
+        )
+    access, refresh = auth_service.login_user(session, user=user, from_ip=ip)
+    return OtpVerifyOut(access_token=access, refresh_token=refresh)
 
 
 @router.post("/refresh", response_model=TokenPair)

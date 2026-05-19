@@ -31,4 +31,19 @@ OTP login
   change forces re-consent (trigger definition is `[NEEDS_LEGAL_REVIEW]`).
 - Every grant / revoke / re-consent writes to `audit_log`.
 
-_Status: skeleton (Slice 1). Implemented in Slice 3._
+## Backend status (Slice 3)
+
+Backend implemented and tested: `POST /api/v1/auth/otp/verify` returns a
+`registration_token` for an unknown phone; `GET /api/v1/projects` (token-gated)
+for the project-lookup screen; `POST /api/v1/onboarding/complete` performs the
+whole flow atomically (account + demographics + contacts + disclaimer ack +
+consents + medical profile + audit in one transaction) and returns a token
+pair. Consent changes via `PATCH /api/v1/me/consents/{type}` take effect on
+the next access check; `data_storage`=false runs the account-closure flow.
+
+The Flutter onboarding **screens** (this exact order/UX) are wired in a later
+mobile slice; the backend contract above is complete and stable.
+
+`CONSENT_POLICY_VERSION` lives in `app/enums.py`; bumping it forces re-consent.
+The precise trigger for a forced re-consent remains `[NEEDS_LEGAL_REVIEW]`
+(see compliance-notes.md).

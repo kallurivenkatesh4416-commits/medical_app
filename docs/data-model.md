@@ -30,4 +30,10 @@
   NOTHING` blocks it at the DB in prod. `alembic check` verifies model↔migration
   parity in CI scope.
 
+- **Slice 3** (migration `0002_onboarding`): `residents`, `emergency_contacts`,
+  `consents` (unique per resident+type, with `policy_version`/`granted_at`/
+  `revoked_at`), `medical_profiles` (PHI; JSON lists). Onboarding writes account
+  + profile + contacts + consents + audit in **one transaction**. Revoking
+  `data_storage` soft-deletes the user and revokes all refresh tokens.
+
 _Schema continues to grow per slice._

@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     otp_length: int = 6
     otp_max_attempts: int = 5
 
+    # Short-lived grant issued after OTP verify when no account exists yet,
+    # consumed by the onboarding endpoint to create the resident.
+    registration_ttl_seconds: int = 900
+
     # Only trust X-Forwarded-For when the app actually sits behind a trusted
     # reverse proxy (set true in that deployment). Default false so clients
     # cannot spoof the audited source IP.
