@@ -37,8 +37,10 @@
   `data_storage` soft-deletes the user and revokes all refresh tokens.
 
 - **Slice 3 review** (migration `0003_idempotency`): `idempotency_keys`
-  (unique `endpoint`+`key`, stores only the created `user_id` — never tokens).
-  Backs the brief §10 idempotency convention; onboarding records its key in the
-  same transaction as the account so create + key commit atomically.
+  (unique `endpoint`+`key`; stores `owner_fp` + `request_fp` + the created
+  `user_id` — never tokens). Backs the brief §10 idempotency convention;
+  onboarding records its key in the same transaction as the account so
+  create + key commit atomically. Replay is owner+request bound (see
+  compliance-notes).
 
 _Schema continues to grow per slice._

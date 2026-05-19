@@ -62,7 +62,7 @@ def complete_onboarding(
     phone: str,
     data: OnboardingInput,
     from_ip: str | None,
-    idempotency_key: str | None = None,
+    idem_ctx: idempotency.IdemContext | None = None,
 ) -> User:
     if not data.disclaimer_acknowledged:
         raise AuthError(422, "disclaimer_required", "The safety disclaimer must be acknowledged.")
@@ -178,11 +178,11 @@ def complete_onboarding(
         commit=False,
     )
 
-    if idempotency_key:
+    if idem_ctx is not None:
         idempotency.stage(
             session,
             endpoint=idempotency.ONBOARDING_ENDPOINT,
-            key=idempotency_key,
+            ctx=idem_ctx,
             user_id=user.id,
         )
 

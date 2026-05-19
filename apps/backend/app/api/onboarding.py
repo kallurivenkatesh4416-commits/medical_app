@@ -91,12 +91,26 @@ def onboarding_complete(
         access, refresh = auth_service.login_user(session, user=user, from_ip=ip)
         return OnboardingOut(access_token=access, refresh_token=refresh)
 
-    # Idempotent replay: a prior success with this key returns a working
-    # session (fresh tokens — secrets are never stored at rest), not a 409.
+    # Idempotent replay — but ONLY for the same verified phone and the same
+    # request body. A key replayed by a different phone, or with a different
+    # payload, is a conflict (never returns another account's session).
+    ctx: idempotency.IdemContext | None = None
     if idempotency_key:
-        prior = idempotency.find(
-            session, idempotency.ONBOARDING_ENDPOINT, idempotency_key
+        ctx = idempotency.IdemContext(
+            key=idempotency_key,
+            owner_fp=idempotency.owner_fingerprint(phone),
+            request_fp=idempotency.request_fingerprint(body.model_dump(mode="json")),
         )
+        try:
+            prior = idempotency.check_replay(
+                session, idempotency.ONBOARDING_ENDPOINT, ctx
+            )
+        except idempotency.IdempotencyConflict as exc:
+            raise AuthError(
+                409,
+                "idempotency_key_conflict",
+                "This Idempotency-Key was used with a different request or account.",
+            ) from exc
         if prior is not None and prior.user_id is not None:
             existing = session.get(User, prior.user_id)
             if existing is not None:
@@ -132,12 +146,13 @@ def onboarding_complete(
             phone=phone,
             data=data,
             from_ip=ip,
-            idempotency_key=idempotency_key,
+            idem_ctx=ctx,
         )
     except AuthError as exc:
         # Concurrent racer with the same key won the create — replay rather
-        # than surfacing the duplicate to a retrying client.
-        if idempotency_key and exc.code == "already_registered":
+        # than surfacing the duplicate to a retrying client. Safe: we look up
+        # by the CURRENT verified phone, never by the key alone.
+        if ctx is not None and exc.code == "already_registered":
             existing = session.exec(
                 select(User).where(User.phone == phone)
             ).first()

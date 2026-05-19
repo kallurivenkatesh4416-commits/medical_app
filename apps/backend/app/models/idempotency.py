@@ -23,5 +23,12 @@ class IdempotencyKey(UUIDPKMixin, table=True):
 
     endpoint: str = Field(index=True)
     key: str = Field(index=True)
+    # Non-reversible fingerprint of the verified phone that created this key.
+    # Replay is refused unless the caller proves the SAME phone (prevents one
+    # subject reusing another subject's key to obtain their tokens).
+    owner_fp: str = Field()
+    # Fingerprint of the original request body; a same-key replay with a
+    # different payload is a conflict, not a replay.
+    request_fp: str = Field()
     user_id: uuid.UUID | None = Field(default=None)
     created_at: datetime = Field(default_factory=utcnow, nullable=False)

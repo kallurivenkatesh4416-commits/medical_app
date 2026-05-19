@@ -263,3 +263,54 @@ def test_onboarding_is_idempotent_with_key(
         select(Resident).where(Resident.user_id == users[0].id)
     ).all()
     assert len(residents) == 1
+
+
+def test_idempotency_key_is_owner_bound(
+    client: TestClient, project: Project, session: Session
+) -> None:
+    # Phone A creates an account with a key.
+    tok_a = _register_token(client, "+15556660011")
+    first = client.post(
+        "/api/v1/onboarding/complete",
+        json=_payload(str(project.id)),
+        headers={"Authorization": f"Bearer {tok_a}", "Idempotency-Key": "shared"},
+    )
+    assert first.status_code == 200
+
+    # Phone B reuses A's key -> must be a conflict, NOT A's tokens.
+    tok_b = _register_token(client, "+15556660012")
+    stolen = client.post(
+        "/api/v1/onboarding/complete",
+        json=_payload(str(project.id)),
+        headers={"Authorization": f"Bearer {tok_b}", "Idempotency-Key": "shared"},
+    )
+    assert stolen.status_code == 409
+    assert stolen.json()["error"]["code"] == "idempotency_key_conflict"
+    assert "access_token" not in stolen.json()
+    # B never got an account.
+    assert (
+        session.exec(select(User).where(User.phone == "+15556660012")).first()
+        is None
+    )
+
+
+def test_idempotency_same_key_different_body_conflicts(
+    client: TestClient, project: Project
+) -> None:
+    tok = _register_token(client, "+15556660013")
+    hdr = {"Authorization": f"Bearer {tok}", "Idempotency-Key": "k2"}
+    assert (
+        client.post(
+            "/api/v1/onboarding/complete",
+            json=_payload(str(project.id)),
+            headers=hdr,
+        ).status_code
+        == 200
+    )
+    changed = client.post(
+        "/api/v1/onboarding/complete",
+        json=_payload(str(project.id), full_name="Different Name"),
+        headers=hdr,
+    )
+    assert changed.status_code == 409
+    assert changed.json()["error"]["code"] == "idempotency_key_conflict"

@@ -61,6 +61,11 @@
 - Onboarding idempotency: `idempotency_keys` stores only the created
   `user_id`, never access/refresh tokens (no secrets at rest); a retried
   request re-issues fresh tokens for the same account rather than 409.
+- Idempotency keys are owner-bound: each row stores a non-reversible owner
+  fingerprint (verified phone) and a request fingerprint. A replay is honoured
+  only for the SAME verified phone AND the SAME body; any mismatch is a
+  `idempotency_key_conflict` (409) — a key cannot be reused by another subject
+  to obtain that subject's session.
 
 ## Open questions — `[NEEDS_LEGAL_REVIEW]`
 

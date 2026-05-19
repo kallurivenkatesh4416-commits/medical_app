@@ -23,6 +23,8 @@ def upgrade() -> None:
         sa.Column("id", sa.Uuid(), primary_key=True),
         sa.Column("endpoint", sa.String(), nullable=False),
         sa.Column("key", sa.String(), nullable=False),
+        sa.Column("owner_fp", sa.String(), nullable=False),
+        sa.Column("request_fp", sa.String(), nullable=False),
         sa.Column("user_id", sa.Uuid(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.UniqueConstraint(
