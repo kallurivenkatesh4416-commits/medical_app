@@ -108,3 +108,28 @@
   or the first fallback tap.
 
 - Still Slice 7: case lifecycle (`acknowledged`→…→`closed`), vitals, notes.
+
+## Slice 7 status
+
+- **Lifecycle:** staff transition cases through
+  `acknowledged → en_route → on_site → treated_on_site/escalated → closed`.
+  `acknowledged_at` is set on acknowledge, so Slice 6 backup escalation stops
+  and the resident status endpoint returns `acknowledged=true`. `on_site_at`,
+  `en_route_at`, `escalated_at`, and `closed_at` are recorded as applicable.
+- **Timeline + audit:** every transition writes a distinct `case_events` row
+  (`case_acknowledged`, `case_en_route`, `case_on_site`,
+  `case_treated_on_site`, `case_escalated`, `case_closed`) and an
+  `EMERGENCY_CASE_TRANSITIONED` audit row. Existing Slice 6 event names
+  (`alert_created`, `backup_escalated`, `fallback_invoked`) remain untouched.
+- **Vitals:** doctor/nurse can record manual BP, SpO2, HR, RR, and temperature
+  after the case is marked on-site. Each write is audited and appears in the
+  case detail timeline.
+- **Notes:** doctor/nurse can add observation notes; treatment/escalation notes
+  are doctor-only. Treatment notes require the Telemedicine fields captured by
+  the schema: doctor name, registration number, consultation timestamp, advice,
+  and patient consent flag.
+- **KPIs:** `/emergency/kpis` returns PHI-free project aggregates (case counts,
+  average alert→ack and alert→on-site seconds). `builder_admin` can read this
+  endpoint, while patient-level case detail remains blocked.
+
+- Still Slice 8: hospital handover PDF generation and dispatch.

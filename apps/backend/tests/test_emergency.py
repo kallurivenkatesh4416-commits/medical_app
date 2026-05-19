@@ -809,6 +809,296 @@ def test_case_status_is_owner_scoped_and_reflects_ack(
     assert s2.json()["acknowledged"] is True
 
 
+def test_case_lifecycle_sets_timestamps_events_audit_and_stops_escalation(
+    client: TestClient, project: Project, session: Session, make_user, login
+) -> None:
+    resident_token, _ = _onboard(client, project, session, "+15559990060")
+    doctor = make_user(Role.DOCTOR, phone="+15559991260")
+    ops = make_user(Role.OPS, phone="+15559991261")
+    doctor_headers = _auth(client, login, doctor)
+
+    created = client.post(
+        "/api/v1/emergency/alerts",
+        json={"symptom_codes": ["fall"]},
+        headers={
+            "Authorization": f"Bearer {resident_token}",
+            "Idempotency-Key": "life",
+        },
+    )
+    assert created.status_code == 200, created.text
+    case_id = created.json()["id"]
+    cid = uuid.UUID(case_id)
+
+    case = session.get(EmergencyCase, cid)
+    case.alert_time = utcnow() - timedelta(seconds=120)
+    session.add(case)
+    session.commit()
+
+    ack = client.post(
+        f"/api/v1/emergency/alerts/{case_id}/transition",
+        json={"target_status": CaseStatus.ACKNOWLEDGED.value},
+        headers=doctor_headers,
+    )
+    assert ack.status_code == 200, ack.text
+    assert ack.json()["status"] == CaseStatus.ACKNOWLEDGED.value
+    assert ack.json()["acknowledged_at"] is not None
+
+    # acknowledged_at is load-bearing for Slice 6 escalation and mobile status.
+    run = client.post(
+        "/api/v1/emergency/escalations/run", headers=_auth(client, login, ops)
+    )
+    assert run.status_code == 200
+    assert run.json()["escalated_case_ids"] == []
+    owner_status = client.get(
+        f"/api/v1/emergency/alerts/{case_id}/status",
+        headers={"Authorization": f"Bearer {resident_token}"},
+    )
+    assert owner_status.json()["acknowledged"] is True
+
+    for target in (
+        CaseStatus.EN_ROUTE,
+        CaseStatus.ON_SITE,
+        CaseStatus.TREATED_ON_SITE,
+    ):
+        resp = client.post(
+            f"/api/v1/emergency/alerts/{case_id}/transition",
+            json={
+                "target_status": target.value,
+                "resolved_outcome": (
+                    "Treated on site" if target is CaseStatus.TREATED_ON_SITE else None
+                ),
+            },
+            headers=doctor_headers,
+        )
+        assert resp.status_code == 200, resp.text
+    closed = client.post(
+        f"/api/v1/emergency/alerts/{case_id}/transition",
+        json={"target_status": CaseStatus.CLOSED.value},
+        headers=doctor_headers,
+    )
+    assert closed.status_code == 200, closed.text
+    assert closed.json()["status"] == CaseStatus.CLOSED.value
+    assert closed.json()["on_site_at"] is not None
+    assert closed.json()["closed_at"] is not None
+    assert closed.json()["resolved_outcome"] == "Treated on site"
+
+    feed = client.get("/api/v1/emergency/alerts/active", headers=doctor_headers)
+    assert feed.status_code == 200
+    assert feed.json() == []
+
+    event_types = [
+        e.event_type
+        for e in session.exec(select(CaseEvent).where(CaseEvent.case_id == cid)).all()
+    ]
+    assert "case_acknowledged" in event_types
+    assert "case_en_route" in event_types
+    assert "case_on_site" in event_types
+    assert "case_treated_on_site" in event_types
+    assert "case_closed" in event_types
+    assert emergency_service.BACKUP_ESCALATED_EVENT not in event_types
+    assert AuditAction.EMERGENCY_CASE_TRANSITIONED.value in list(
+        session.exec(select(AuditLog.action)).all()
+    )
+
+
+def test_lifecycle_rejects_invalid_order_and_restricts_outcomes(
+    client: TestClient, project: Project, session: Session, make_user, login
+) -> None:
+    resident_token, _ = _onboard(client, project, session, "+15559990061")
+    doctor = make_user(Role.DOCTOR, phone="+15559991262")
+    nurse = make_user(Role.NURSE, phone="+15559991263")
+    created = client.post(
+        "/api/v1/emergency/alerts",
+        json={"symptom_codes": ["fall"]},
+        headers={
+            "Authorization": f"Bearer {resident_token}",
+            "Idempotency-Key": "life-invalid",
+        },
+    )
+    case_id = created.json()["id"]
+
+    bad_order = client.post(
+        f"/api/v1/emergency/alerts/{case_id}/transition",
+        json={"target_status": CaseStatus.ON_SITE.value},
+        headers=_auth(client, login, doctor),
+    )
+    assert bad_order.status_code == 409
+    assert bad_order.json()["error"]["code"] == "invalid_case_transition"
+
+    for target in (CaseStatus.ACKNOWLEDGED, CaseStatus.EN_ROUTE, CaseStatus.ON_SITE):
+        ok = client.post(
+            f"/api/v1/emergency/alerts/{case_id}/transition",
+            json={"target_status": target.value},
+            headers=_auth(client, login, doctor),
+        )
+        assert ok.status_code == 200, ok.text
+
+    nurse_outcome = client.post(
+        f"/api/v1/emergency/alerts/{case_id}/transition",
+        json={"target_status": CaseStatus.ESCALATED.value},
+        headers=_auth(client, login, nurse),
+    )
+    assert nurse_outcome.status_code == 403
+    assert nurse_outcome.json()["error"]["code"] == "doctor_required"
+
+    other_project = Project(name="Lifecycle Other")
+    session.add(other_project)
+    session.commit()
+    outsider = User(
+        project_id=other_project.id,
+        phone="+15559991264",
+        role=Role.DOCTOR.value,
+        full_name="Outside Doctor",
+    )
+    session.add(outsider)
+    session.commit()
+    cross = client.get(
+        f"/api/v1/emergency/alerts/{case_id}",
+        headers=_auth(client, login, outsider),
+    )
+    assert cross.status_code == 404
+
+
+def test_vitals_and_telemedicine_notes_are_audited_and_visible_in_detail(
+    client: TestClient, project: Project, session: Session, make_user, login
+) -> None:
+    resident_token, _ = _onboard(client, project, session, "+15559990062")
+    doctor = make_user(Role.DOCTOR, phone="+15559991265")
+    nurse = make_user(Role.NURSE, phone="+15559991266")
+    doctor_headers = _auth(client, login, doctor)
+    nurse_headers = _auth(client, login, nurse)
+
+    created = client.post(
+        "/api/v1/emergency/alerts",
+        json={"symptom_codes": ["fall"]},
+        headers={
+            "Authorization": f"Bearer {resident_token}",
+            "Idempotency-Key": "life-vitals",
+        },
+    )
+    case_id = created.json()["id"]
+    for target in (CaseStatus.ACKNOWLEDGED, CaseStatus.EN_ROUTE, CaseStatus.ON_SITE):
+        resp = client.post(
+            f"/api/v1/emergency/alerts/{case_id}/transition",
+            json={"target_status": target.value},
+            headers=doctor_headers,
+        )
+        assert resp.status_code == 200, resp.text
+
+    too_early = client.post(
+        f"/api/v1/emergency/alerts/{case_id}/vitals",
+        json={},
+        headers=nurse_headers,
+    )
+    assert too_early.status_code == 422
+
+    vitals = client.post(
+        f"/api/v1/emergency/alerts/{case_id}/vitals",
+        json={
+            "blood_pressure_systolic": 128,
+            "blood_pressure_diastolic": 82,
+            "spo2_percent": 97,
+            "heart_rate_bpm": 88,
+            "respiratory_rate_bpm": 18,
+            "temperature_c": 37.1,
+        },
+        headers=nurse_headers,
+    )
+    assert vitals.status_code == 200, vitals.text
+    assert vitals.json()["spo2_percent"] == 97
+
+    missing_fields = client.post(
+        f"/api/v1/emergency/alerts/{case_id}/notes",
+        json={"note_type": "treatment", "body": "Care provided."},
+        headers=doctor_headers,
+    )
+    assert missing_fields.status_code == 422
+    assert missing_fields.json()["error"]["code"] == "telemedicine_fields_required"
+
+    note = client.post(
+        f"/api/v1/emergency/alerts/{case_id}/notes",
+        json={
+            "note_type": "treatment",
+            "body": "Resident monitored and supported on site.",
+            "doctor_name": "Dr Kavita Rao",
+            "doctor_registration_number": "TSMC-12345",
+            "consultation_timestamp": utcnow().isoformat(),
+            "advice_given": "Continue observation and call hospital if symptoms worsen.",
+            "patient_consent_obtained": True,
+        },
+        headers=doctor_headers,
+    )
+    assert note.status_code == 200, note.text
+    assert note.json()["doctor_registration_number"] == "TSMC-12345"
+    assert note.json()["patient_consent_obtained"] is True
+
+    detail = client.get(
+        f"/api/v1/emergency/alerts/{case_id}",
+        headers=doctor_headers,
+    )
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert body["vitals"][0]["heart_rate_bpm"] == 88
+    assert body["notes"][0]["advice_given"].startswith("Continue observation")
+    assert any(e["event_type"] == emergency_service.VITALS_RECORDED_EVENT for e in body["events"])
+    assert any(
+        e["event_type"] == emergency_service.CASE_NOTE_RECORDED_EVENT
+        for e in body["events"]
+    )
+
+    actions = list(session.exec(select(AuditLog.action)).all())
+    assert AuditAction.CASE_VITAL_RECORDED.value in actions
+    assert AuditAction.CASE_NOTE_RECORDED.value in actions
+    assert AuditAction.EMERGENCY_CASE_READ.value in actions
+
+
+def test_emergency_kpis_are_aggregate_and_builder_visible(
+    client: TestClient, project: Project, session: Session, make_user, login
+) -> None:
+    resident_token, _ = _onboard(client, project, session, "+15559990063")
+    doctor = make_user(Role.DOCTOR, phone="+15559991267")
+    builder = make_user(Role.BUILDER_ADMIN, phone="+15559991268")
+    doctor_headers = _auth(client, login, doctor)
+
+    created = client.post(
+        "/api/v1/emergency/alerts",
+        json={"symptom_codes": ["fall"]},
+        headers={
+            "Authorization": f"Bearer {resident_token}",
+            "Idempotency-Key": "life-kpi",
+        },
+    )
+    case_id = created.json()["id"]
+    case = session.get(EmergencyCase, uuid.UUID(case_id))
+    case.alert_time = utcnow() - timedelta(seconds=300)
+    session.add(case)
+    session.commit()
+
+    for target in (
+        CaseStatus.ACKNOWLEDGED,
+        CaseStatus.EN_ROUTE,
+        CaseStatus.ON_SITE,
+        CaseStatus.TREATED_ON_SITE,
+        CaseStatus.CLOSED,
+    ):
+        resp = client.post(
+            f"/api/v1/emergency/alerts/{case_id}/transition",
+            json={"target_status": target.value},
+            headers=doctor_headers,
+        )
+        assert resp.status_code == 200, resp.text
+
+    kpis = client.get("/api/v1/emergency/kpis", headers=_auth(client, login, builder))
+    assert kpis.status_code == 200, kpis.text
+    assert kpis.json()["total_cases"] == 1
+    assert kpis.json()["closed_cases"] == 1
+    assert kpis.json()["average_ack_seconds"] is not None
+    assert "resident_name" not in kpis.text
+    assert AuditAction.EMERGENCY_KPI_READ.value in list(
+        session.exec(select(AuditLog.action)).all()
+    )
+
+
 def test_oncall_resolution_ignores_wrong_project_or_role(
     client: TestClient, project: Project, session: Session, make_user
 ) -> None:

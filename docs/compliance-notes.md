@@ -169,6 +169,26 @@
   server case id (no PII/PHI); it is cleared on acknowledgment or the first
   fallback tap.
 
+## Slice 7 implementation notes (case lifecycle)
+
+- Acknowledgment is now a real lifecycle transition: `acknowledged_at` is set
+  and status moves off `alerted`, so no-ack escalation and the resident mobile
+  fallback status check both stop treating the case as unacknowledged.
+- Every lifecycle transition writes `case_events` and `audit_log`. Event names
+  are distinct from Slice 6 markers (`backup_escalated`, `fallback_invoked`) so
+  escalation idempotency is not disturbed.
+- Manual vitals and case notes are PHI. Detail/vitals/notes endpoints are
+  restricted to doctor/nurse/ops as appropriate, PHI-blocked for
+  `builder_admin`/`security_desk`, tenant-scoped, and audited.
+- Treatment notes capture the Telemedicine fields required by the brief:
+  doctor name, medical-council registration number, consultation timestamp,
+  advice given, and patient consent flag. Item #4 below remains legal-review
+  scoped: the code stores the registration number, but does not decide whether
+  self-attestation is sufficient.
+- Emergency KPIs are aggregate only and contain no resident identifiers or
+  clinical detail. `builder_admin` can read the KPI endpoint, but cannot read
+  patient-level case detail, vitals, or notes.
+
 ## Open questions — `[NEEDS_LEGAL_REVIEW]`
 
 1. `[NEEDS_LEGAL_REVIEW]` DPDP cross-border data: acceptable AWS S3 region for

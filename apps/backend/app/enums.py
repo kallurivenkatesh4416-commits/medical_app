@@ -65,6 +65,12 @@ class NotificationStatus(StrEnum):
     ACKNOWLEDGED = "acknowledged"
 
 
+class CaseNoteType(StrEnum):
+    OBSERVATION = "observation"
+    TREATMENT = "treatment"
+    ESCALATION_REASON = "escalation_reason"
+
+
 class FallbackChannel(StrEnum):
     """Targets on the mobile 60s failed-alert fallback sheet. Every tap writes
     a ``case_events`` row with the chosen channel (PLAN.md Slice 6)."""
@@ -124,3 +130,8 @@ class AuditAction(StrEnum):
     EMERGENCY_ALERT_ESCALATED = "emergency_alert_escalated"
     EMERGENCY_FALLBACK_NUMBERS_READ = "emergency_fallback_numbers_read"
     EMERGENCY_FALLBACK_INVOKED = "emergency_fallback_invoked"
+    EMERGENCY_CASE_READ = "emergency_case_read"
+    EMERGENCY_CASE_TRANSITIONED = "emergency_case_transitioned"
+    CASE_VITAL_RECORDED = "case_vital_recorded"
+    CASE_NOTE_RECORDED = "case_note_recorded"
+    EMERGENCY_KPI_READ = "emergency_kpi_read"

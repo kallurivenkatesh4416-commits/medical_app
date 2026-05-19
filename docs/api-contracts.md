@@ -44,6 +44,11 @@
 | POST | `/api/v1/emergency/escalations/run` | 6 | ops-only, tenant-scoped; pages the backup doctor for alerts with no ack within the window. Idempotent; manual entry point until scheduler infra lands |
 | GET | `/api/v1/emergency/alerts/{case_id}/fallback-numbers` | 6 | resident (owner) fallback numbers; 108/112 are constants, the rest resolved from project / on-call / contacts; audited |
 | POST | `/api/v1/emergency/alerts/{case_id}/fallback` | 6 | resident (owner) records a fallback-sheet tap (`channel`) to `case_events`; audited. Does not cancel the retrying alert |
+| GET | `/api/v1/emergency/alerts/{case_id}` | 7 | doctor/nurse/ops case detail with vitals, notes, and timeline; PHI-blocked, tenant-scoped, audited |
+| POST | `/api/v1/emergency/alerts/{case_id}/transition` | 7 | doctor/nurse lifecycle transition (`acknowledged → en_route → on_site → treated_on_site/escalated → closed`); every transition writes `case_events` + audit |
+| POST | `/api/v1/emergency/alerts/{case_id}/vitals` | 7 | doctor/nurse records manual vitals after `on_site`; audited and timeline-backed |
+| POST | `/api/v1/emergency/alerts/{case_id}/notes` | 7 | doctor/nurse records case notes; treatment/escalation notes require doctor role; treatment notes capture Telemedicine fields |
+| GET | `/api/v1/emergency/kpis` | 7 | PHI-free project aggregate KPIs (`total/active/closed`, average ack/on-site seconds); builder_admin can read |
 
 Auth: `Authorization: Bearer <access>`. Access tokens are short-lived JWTs;
 refresh tokens are opaque, stored hashed, rotated on every use.

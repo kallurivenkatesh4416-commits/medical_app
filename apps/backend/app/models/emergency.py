@@ -24,7 +24,9 @@ class EmergencyCase(UUIDPKMixin, TimestampMixin, table=True):
     status: str = Field(index=True)
     alert_time: datetime = Field(default_factory=utcnow, nullable=False)
     acknowledged_at: datetime | None = Field(default=None)
+    en_route_at: datetime | None = Field(default=None)
     on_site_at: datetime | None = Field(default=None)
+    escalated_at: datetime | None = Field(default=None)
     closed_at: datetime | None = Field(default=None)
 
     symptom_codes: list = Field(default_factory=list, sa_column=Column(JSON))
@@ -68,3 +70,38 @@ class DeviceToken(UUIDPKMixin, TimestampMixin, table=True):
     push_token: str = Field(index=True, unique=True)
     disabled_at: datetime | None = Field(default=None)
     last_seen_at: datetime = Field(default_factory=utcnow, nullable=False)
+
+
+class CaseVital(UUIDPKMixin, TimestampMixin, table=True):
+    __tablename__ = "case_vitals"
+
+    project_id: uuid.UUID = Field(foreign_key="projects.id", index=True)
+    case_id: uuid.UUID = Field(foreign_key="emergency_cases.id", index=True)
+    recorded_by: uuid.UUID = Field(foreign_key="users.id", index=True)
+    recorded_at: datetime = Field(default_factory=utcnow, nullable=False)
+
+    blood_pressure_systolic: int | None = Field(default=None)
+    blood_pressure_diastolic: int | None = Field(default=None)
+    spo2_percent: int | None = Field(default=None)
+    heart_rate_bpm: int | None = Field(default=None)
+    respiratory_rate_bpm: int | None = Field(default=None)
+    temperature_c: float | None = Field(default=None)
+    notes: str | None = Field(default=None)
+
+
+class CaseNote(UUIDPKMixin, TimestampMixin, table=True):
+    __tablename__ = "case_notes"
+
+    project_id: uuid.UUID = Field(foreign_key="projects.id", index=True)
+    case_id: uuid.UUID = Field(foreign_key="emergency_cases.id", index=True)
+    author_id: uuid.UUID = Field(foreign_key="users.id", index=True)
+    note_type: str = Field(index=True)
+    body: str
+
+    # Telemedicine fields (brief §2.4). UI can be minimal; the schema captures
+    # doctor identity, timestamp, advice, and consent flag from day one.
+    doctor_name: str | None = Field(default=None)
+    doctor_registration_number: str | None = Field(default=None)
+    consultation_timestamp: datetime | None = Field(default=None)
+    advice_given: str | None = Field(default=None)
+    patient_consent_obtained: bool = Field(default=False)

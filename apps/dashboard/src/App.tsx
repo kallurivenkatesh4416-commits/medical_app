@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
 type Attempt = {
   channel: string;
@@ -14,10 +14,34 @@ type Alert = {
   flat_villa_number: string | null;
   status: string;
   alert_time: string;
+  acknowledged_at: string | null;
+  en_route_at: string | null;
+  on_site_at: string | null;
+  escalated_at: string | null;
+  closed_at: string | null;
   symptom_codes: string[];
   location_text: string | null;
   assigned_doctor_id: string | null;
+  resolved_outcome: string | null;
   notification_attempts: Attempt[];
+};
+
+type VitalsDraft = {
+  blood_pressure_systolic: string;
+  blood_pressure_diastolic: string;
+  spo2_percent: string;
+  heart_rate_bpm: string;
+  respiratory_rate_bpm: string;
+  temperature_c: string;
+};
+
+const emptyVitals: VitalsDraft = {
+  blood_pressure_systolic: "",
+  blood_pressure_diastolic: "",
+  spo2_percent: "",
+  heart_rate_bpm: "",
+  respiratory_rate_bpm: "",
+  temperature_c: "",
 };
 
 const disclaimer =
@@ -31,41 +55,57 @@ export default function App() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [status, setStatus] = useState("Idle");
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [actionStatus, setActionStatus] = useState("");
+  const [vitals, setVitals] = useState<VitalsDraft>(emptyVitals);
+  const [noteBody, setNoteBody] = useState("");
+  const [doctorName, setDoctorName] = useState("");
+  const [doctorRegistration, setDoctorRegistration] = useState("");
+  const [adviceGiven, setAdviceGiven] = useState("");
+  const [patientConsent, setPatientConsent] = useState(false);
 
   const activeCount = alerts.length;
   const newest = useMemo(() => alerts[0], [alerts]);
+  const selected = useMemo(
+    () => alerts.find((alert) => alert.id === selectedId) ?? newest,
+    [alerts, newest, selectedId],
+  );
+  const apiBaseClean = apiBase.replace(/\/$/, "");
 
   useEffect(() => {
     localStorage.setItem("dashboardAccessToken", token);
   }, [token]);
 
+  const loadAlerts = useCallback(async () => {
+    if (!token.trim()) {
+      setStatus("Enter doctor access token");
+      setAlerts([]);
+      return;
+    }
+    setStatus("Refreshing");
+    try {
+      const resp = await fetch(`${apiBaseClean}/api/v1/emergency/alerts/active`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!resp.ok) {
+        setStatus(`Feed unavailable (${resp.status})`);
+        return;
+      }
+      const data = (await resp.json()) as Alert[];
+      setAlerts(data);
+      setStatus("Live");
+      setLastUpdated(new Date().toLocaleTimeString());
+      setSelectedId((current) => (current && data.some((a) => a.id === current) ? current : data[0]?.id ?? null));
+    } catch {
+      setStatus("Network error");
+    }
+  }, [apiBaseClean, token]);
+
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
-      if (!token.trim()) {
-        setStatus("Enter doctor access token");
-        setAlerts([]);
-        return;
-      }
-      setStatus("Refreshing");
-      try {
-        const resp = await fetch(`${apiBase.replace(/\/$/, "")}/api/v1/emergency/alerts/active`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!resp.ok) {
-          setStatus(`Feed unavailable (${resp.status})`);
-          return;
-        }
-        const data = (await resp.json()) as Alert[];
-        if (!cancelled) {
-          setAlerts(data);
-          setStatus("Live");
-          setLastUpdated(new Date().toLocaleTimeString());
-        }
-      } catch {
-        if (!cancelled) setStatus("Network error");
-      }
+      if (!cancelled) await loadAlerts();
     }
 
     void load();
@@ -74,7 +114,59 @@ export default function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [apiBase, token]);
+  }, [loadAlerts]);
+
+  async function postJson(path: string, body: unknown) {
+    if (!token.trim()) return;
+    setActionStatus("Saving");
+    const resp = await fetch(`${apiBaseClean}${path}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      setActionStatus(`Action failed (${resp.status})`);
+      return;
+    }
+    setActionStatus("Saved");
+    await loadAlerts();
+  }
+
+  function transition(targetStatus: string, resolvedOutcome?: string) {
+    if (!selected) return;
+    void postJson(`/api/v1/emergency/alerts/${selected.id}/transition`, {
+      target_status: targetStatus,
+      resolved_outcome: resolvedOutcome ?? null,
+    });
+  }
+
+  function submitVitals(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selected) return;
+    const body = Object.fromEntries(
+      Object.entries(vitals)
+        .filter(([, value]) => value.trim() !== "")
+        .map(([key, value]) => [key, key === "temperature_c" ? Number.parseFloat(value) : Number.parseInt(value, 10)]),
+    );
+    void postJson(`/api/v1/emergency/alerts/${selected.id}/vitals`, body);
+    setVitals(emptyVitals);
+  }
+
+  function submitNote(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selected) return;
+    void postJson(`/api/v1/emergency/alerts/${selected.id}/notes`, {
+      note_type: "treatment",
+      body: noteBody,
+      doctor_name: doctorName,
+      doctor_registration_number: doctorRegistration,
+      consultation_timestamp: new Date().toISOString(),
+      advice_given: adviceGiven,
+      patient_consent_obtained: patientConsent,
+    });
+    setNoteBody("");
+    setAdviceGiven("");
+  }
 
   return (
     <main style={styles.shell}>
@@ -140,6 +232,9 @@ export default function App() {
                 </div>
               </div>
               <div style={styles.attempts}>
+                <button type="button" onClick={() => setSelectedId(alert.id)} style={styles.smallButton}>
+                  Select
+                </button>
                 {alert.notification_attempts.map((attempt) => (
                   <span key={`${alert.id}-${attempt.channel}`} style={styles.attempt}>
                     {attempt.channel}: {attempt.status}
@@ -150,6 +245,114 @@ export default function App() {
           ))
         )}
       </section>
+
+      {selected ? (
+        <section style={styles.workspace}>
+          <div style={styles.workspaceHeader}>
+            <div>
+              <p style={styles.kicker}>Selected Case</p>
+              <h2 style={styles.panelTitle}>
+                {selected.resident_name ?? "Resident"} · {selected.status}
+              </h2>
+            </div>
+            <span style={styles.status}>{actionStatus}</span>
+          </div>
+
+          <div style={styles.actions}>
+            {selected.status === "alerted" ? (
+              <button onClick={() => transition("acknowledged")} style={styles.actionButton}>
+                Acknowledge
+              </button>
+            ) : null}
+            {selected.status === "acknowledged" ? (
+              <button onClick={() => transition("en_route")} style={styles.actionButton}>
+                En Route
+              </button>
+            ) : null}
+            {selected.status === "en_route" ? (
+              <button onClick={() => transition("on_site")} style={styles.actionButton}>
+                On Site
+              </button>
+            ) : null}
+            {selected.status === "on_site" ? (
+              <>
+                <button
+                  onClick={() => transition("treated_on_site", "Treated on site")}
+                  style={styles.actionButton}
+                >
+                  Treated On Site
+                </button>
+                <button
+                  onClick={() => transition("escalated", "Escalated to hospital")}
+                  style={styles.actionButton}
+                >
+                  Escalate
+                </button>
+              </>
+            ) : null}
+            {selected.status === "treated_on_site" || selected.status === "escalated" ? (
+              <button onClick={() => transition("closed")} style={styles.actionButton}>
+                Close
+              </button>
+            ) : null}
+          </div>
+
+          <form onSubmit={submitVitals} style={styles.formGrid}>
+            {Object.keys(emptyVitals).map((key) => (
+              <label key={key} style={styles.field}>
+                {key.replaceAll("_", " ")}
+                <input
+                  value={vitals[key as keyof VitalsDraft]}
+                  onChange={(event) => setVitals({ ...vitals, [key]: event.target.value })}
+                  style={styles.input}
+                  inputMode="decimal"
+                />
+              </label>
+            ))}
+            <button type="submit" style={styles.actionButton}>
+              Save Vitals
+            </button>
+          </form>
+
+          <form onSubmit={submitNote} style={styles.noteForm}>
+            <label style={styles.field}>
+              Note
+              <textarea value={noteBody} onChange={(event) => setNoteBody(event.target.value)} style={styles.textarea} />
+            </label>
+            <label style={styles.field}>
+              Doctor name
+              <input value={doctorName} onChange={(event) => setDoctorName(event.target.value)} style={styles.input} />
+            </label>
+            <label style={styles.field}>
+              Registration number
+              <input
+                value={doctorRegistration}
+                onChange={(event) => setDoctorRegistration(event.target.value)}
+                style={styles.input}
+              />
+            </label>
+            <label style={styles.field}>
+              Advice
+              <textarea
+                value={adviceGiven}
+                onChange={(event) => setAdviceGiven(event.target.value)}
+                style={styles.textarea}
+              />
+            </label>
+            <label style={styles.checkboxRow}>
+              <input
+                type="checkbox"
+                checked={patientConsent}
+                onChange={(event) => setPatientConsent(event.target.checked)}
+              />
+              Patient consent recorded
+            </label>
+            <button type="submit" style={styles.actionButton}>
+              Save Note
+            </button>
+          </form>
+        </section>
+      ) : null}
 
       <footer style={styles.footer}>{disclaimer}</footer>
     </main>
@@ -265,5 +468,50 @@ const styles: Record<string, React.CSSProperties> = {
   muted: { color: "#596273", fontSize: 14, marginTop: 4 },
   attempts: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "end" },
   attempt: { background: "#eef2f7", borderRadius: 6, padding: "5px 8px", fontSize: 13 },
+  smallButton: {
+    minHeight: 32,
+    borderRadius: 6,
+    border: "1px solid #c9d0da",
+    background: "white",
+    color: "#1d2430",
+  },
+  workspace: {
+    maxWidth: 1120,
+    margin: "16px auto 0",
+    padding: 16,
+    borderRadius: 8,
+    background: "white",
+    border: "1px solid #e1e5eb",
+    display: "grid",
+    gap: 14,
+  },
+  workspaceHeader: { display: "flex", justifyContent: "space-between", gap: 16, alignItems: "start" },
+  panelTitle: { margin: 0, fontSize: 20 },
+  actions: { display: "flex", flexWrap: "wrap", gap: 8 },
+  actionButton: {
+    minHeight: 40,
+    borderRadius: 6,
+    border: 0,
+    background: "#1f6f5b",
+    color: "white",
+    padding: "0 14px",
+    fontWeight: 700,
+  },
+  formGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+    gap: 10,
+    alignItems: "end",
+  },
+  noteForm: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10 },
+  textarea: {
+    minHeight: 82,
+    borderRadius: 6,
+    border: "1px solid #c9d0da",
+    padding: 10,
+    fontSize: 14,
+    resize: "vertical",
+  },
+  checkboxRow: { display: "flex", alignItems: "center", gap: 8, color: "#596273", fontSize: 14 },
   footer: { maxWidth: 1120, margin: "18px auto 0", color: "#596273", fontSize: 13 },
 };

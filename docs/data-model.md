@@ -70,4 +70,14 @@
   `backup_escalated` row is the escalation idempotency marker. Lifecycle
   status transitions remain Slice 7.
 
+- **Slice 7** (migration `0007_case_lifecycle`): lifecycle timestamps extend
+  `emergency_cases` with `en_route_at` and `escalated_at` (alongside the
+  existing `acknowledged_at`, `on_site_at`, `closed_at`). `case_vitals` stores
+  manual readings (BP, SpO2, HR, RR, temperature, recorder, timestamp) scoped
+  by case/project. `case_notes` stores the timeline note body/type plus
+  Telemedicine fields: doctor name, medical-council registration number,
+  consultation timestamp, advice given, and patient consent flag. Every
+  lifecycle transition, vital entry, and note entry writes both `case_events`
+  and `audit_log`.
+
 _Schema continues to grow per slice._

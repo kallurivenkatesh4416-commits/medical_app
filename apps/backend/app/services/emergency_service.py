@@ -31,6 +31,7 @@ from sqlmodel import Session, select
 from app.config import get_settings
 from app.enums import (
     AuditAction,
+    CaseNoteType,
     CaseStatus,
     FallbackChannel,
     NotificationChannel,
@@ -40,6 +41,8 @@ from app.enums import (
 from app.models.base import utcnow
 from app.models.emergency import (
     CaseEvent,
+    CaseNote,
+    CaseVital,
     DeviceToken,
     EmergencyCase,
     NotificationAttempt,
@@ -58,10 +61,28 @@ from app.services.residents_service import get_resident_for_user
 
 BACKUP_ESCALATED_EVENT = "backup_escalated"
 FALLBACK_INVOKED_EVENT = "fallback_invoked"
+VITALS_RECORDED_EVENT = "vitals_recorded"
+CASE_NOTE_RECORDED_EVENT = "case_note_recorded"
 
 _ALERT_TITLE = "Emergency alert"
 # PHI-safe: no symptoms/history over SMS/push. Secure detail is behind auth.
 _ALERT_BODY = "A resident needs medical help. Open the Emergency app for details."
+_ALLOWED_TRANSITIONS: dict[str, set[str]] = {
+    CaseStatus.ALERTED.value: {CaseStatus.ACKNOWLEDGED.value},
+    CaseStatus.ACKNOWLEDGED.value: {CaseStatus.EN_ROUTE.value},
+    CaseStatus.EN_ROUTE.value: {CaseStatus.ON_SITE.value},
+    CaseStatus.ON_SITE.value: {
+        CaseStatus.TREATED_ON_SITE.value,
+        CaseStatus.ESCALATED.value,
+    },
+    CaseStatus.TREATED_ON_SITE.value: {CaseStatus.CLOSED.value},
+    CaseStatus.ESCALATED.value: {CaseStatus.CLOSED.value},
+}
+_DOCTOR_ONLY_TRANSITIONS = {
+    CaseStatus.TREATED_ON_SITE.value,
+    CaseStatus.ESCALATED.value,
+    CaseStatus.CLOSED.value,
+}
 
 
 class _ChannelSkip(Exception):
@@ -76,6 +97,28 @@ class AlertInput:
     latitude: float | None
     longitude: float | None
     client_created_at: datetime | None = None
+
+
+@dataclass
+class VitalInput:
+    blood_pressure_systolic: int | None
+    blood_pressure_diastolic: int | None
+    spo2_percent: int | None
+    heart_rate_bpm: int | None
+    respiratory_rate_bpm: int | None
+    temperature_c: float | None
+    notes: str | None = None
+
+
+@dataclass
+class NoteInput:
+    note_type: CaseNoteType
+    body: str
+    doctor_name: str | None
+    doctor_registration_number: str | None
+    consultation_timestamp: datetime | None
+    advice_given: str | None
+    patient_consent_obtained: bool
 
 
 def register_push_token(
@@ -239,6 +282,281 @@ def case_status_for_owner(
     }
 
 
+def read_case_detail(
+    session: Session, *, actor: User, case_id: uuid.UUID, from_ip: str | None
+) -> dict:
+    case = _case_for_staff(session, actor=actor, case_id=case_id)
+    record_audit(
+        session,
+        action=AuditAction.EMERGENCY_CASE_READ,
+        actor_user_id=actor.id,
+        project_id=case.project_id,
+        resource_type="emergency_case",
+        resource_id=str(case.id),
+        from_ip=from_ip,
+        purpose="emergency.case_detail",
+    )
+    return serialize_case_detail(session, case)
+
+
+def transition_case(
+    session: Session,
+    *,
+    actor: User,
+    case_id: uuid.UUID,
+    target_status: CaseStatus,
+    resolved_outcome: str | None,
+    from_ip: str | None,
+) -> dict:
+    """Move a case through the strict Slice 7 lifecycle. The case row is locked
+    only for this short transaction so it cooperates with Slice 6 escalation's
+    ``FOR UPDATE`` candidate selection."""
+    case = _case_for_staff(session, actor=actor, case_id=case_id, lock=True)
+    current = case.status
+    target = target_status.value
+
+    if target == current:
+        return serialize_case(session, case)
+    if target not in _ALLOWED_TRANSITIONS.get(current, set()):
+        raise AuthError(
+            409,
+            "invalid_case_transition",
+            f"Case cannot move from {current} to {target}.",
+        )
+    if target in _DOCTOR_ONLY_TRANSITIONS and actor.role != Role.DOCTOR.value:
+        raise AuthError(403, "doctor_required", "Only a doctor can record this outcome.")
+
+    now = utcnow()
+    if target == CaseStatus.ACKNOWLEDGED.value:
+        case.acknowledged_at = case.acknowledged_at or now
+        if actor.role == Role.DOCTOR.value and case.assigned_doctor_id is None:
+            case.assigned_doctor_id = actor.id
+        _mark_actor_attempts_acknowledged(session, case_id=case.id, actor_id=actor.id)
+    elif target == CaseStatus.EN_ROUTE.value:
+        case.en_route_at = case.en_route_at or now
+    elif target == CaseStatus.ON_SITE.value:
+        case.on_site_at = case.on_site_at or now
+    elif target == CaseStatus.TREATED_ON_SITE.value:
+        case.resolved_outcome = resolved_outcome or case.resolved_outcome or target
+    elif target == CaseStatus.ESCALATED.value:
+        case.escalated_at = case.escalated_at or now
+        case.resolved_outcome = resolved_outcome or case.resolved_outcome or target
+    elif target == CaseStatus.CLOSED.value:
+        case.closed_at = case.closed_at or now
+        if resolved_outcome:
+            case.resolved_outcome = resolved_outcome
+
+    case.status = target
+    session.add(case)
+    session.add(
+        CaseEvent(
+            project_id=case.project_id,
+            case_id=case.id,
+            actor_user_id=actor.id,
+            event_type=f"case_{target}",
+            from_status=current,
+            to_status=target,
+            meta={"resolved_outcome": resolved_outcome} if resolved_outcome else {},
+        )
+    )
+    record_audit(
+        session,
+        action=AuditAction.EMERGENCY_CASE_TRANSITIONED,
+        actor_user_id=actor.id,
+        project_id=case.project_id,
+        resource_type="emergency_case",
+        resource_id=str(case.id),
+        from_ip=from_ip,
+        purpose="emergency.case_transition",
+        meta={"from_status": current, "to_status": target},
+        commit=False,
+    )
+    session.commit()
+    session.refresh(case)
+    return serialize_case(session, case)
+
+
+def record_vitals(
+    session: Session,
+    *,
+    actor: User,
+    case_id: uuid.UUID,
+    data: VitalInput,
+    from_ip: str | None,
+) -> dict:
+    case = _case_for_staff(session, actor=actor, case_id=case_id)
+    if case.status not in {
+        CaseStatus.ON_SITE.value,
+        CaseStatus.TREATED_ON_SITE.value,
+        CaseStatus.ESCALATED.value,
+    }:
+        raise AuthError(
+            409,
+            "case_not_on_site",
+            "Vitals can be recorded after the case is marked on-site.",
+        )
+    if all(
+        value is None
+        for value in (
+            data.blood_pressure_systolic,
+            data.blood_pressure_diastolic,
+            data.spo2_percent,
+            data.heart_rate_bpm,
+            data.respiratory_rate_bpm,
+            data.temperature_c,
+        )
+    ):
+        raise AuthError(422, "vitals_required", "At least one vital reading is required.")
+
+    vital = CaseVital(
+        project_id=case.project_id,
+        case_id=case.id,
+        recorded_by=actor.id,
+        blood_pressure_systolic=data.blood_pressure_systolic,
+        blood_pressure_diastolic=data.blood_pressure_diastolic,
+        spo2_percent=data.spo2_percent,
+        heart_rate_bpm=data.heart_rate_bpm,
+        respiratory_rate_bpm=data.respiratory_rate_bpm,
+        temperature_c=data.temperature_c,
+        notes=data.notes,
+    )
+    session.add(vital)
+    session.flush()
+    session.add(
+        CaseEvent(
+            project_id=case.project_id,
+            case_id=case.id,
+            actor_user_id=actor.id,
+            event_type=VITALS_RECORDED_EVENT,
+            from_status=case.status,
+            to_status=case.status,
+            meta={"vital_id": str(vital.id)},
+        )
+    )
+    record_audit(
+        session,
+        action=AuditAction.CASE_VITAL_RECORDED,
+        actor_user_id=actor.id,
+        project_id=case.project_id,
+        resource_type="case_vital",
+        resource_id=str(vital.id),
+        from_ip=from_ip,
+        purpose="emergency.vitals",
+        commit=False,
+    )
+    session.commit()
+    session.refresh(vital)
+    return serialize_vital(vital)
+
+
+def record_case_note(
+    session: Session,
+    *,
+    actor: User,
+    case_id: uuid.UUID,
+    data: NoteInput,
+    from_ip: str | None,
+) -> dict:
+    case = _case_for_staff(session, actor=actor, case_id=case_id)
+    if case.status == CaseStatus.CLOSED.value:
+        raise AuthError(409, "case_closed", "Closed cases cannot receive new notes.")
+    if data.note_type in {
+        CaseNoteType.TREATMENT,
+        CaseNoteType.ESCALATION_REASON,
+    } and actor.role != Role.DOCTOR.value:
+        raise AuthError(403, "doctor_required", "Only a doctor can record this note.")
+    if data.note_type == CaseNoteType.TREATMENT and any(
+        not value
+        for value in (
+            data.doctor_name,
+            data.doctor_registration_number,
+            data.consultation_timestamp,
+            data.advice_given,
+        )
+    ):
+        raise AuthError(
+            422,
+            "telemedicine_fields_required",
+            "Doctor name, registration number, consultation timestamp, and advice are required.",
+        )
+
+    note = CaseNote(
+        project_id=case.project_id,
+        case_id=case.id,
+        author_id=actor.id,
+        note_type=data.note_type.value,
+        body=data.body,
+        doctor_name=data.doctor_name,
+        doctor_registration_number=data.doctor_registration_number,
+        consultation_timestamp=data.consultation_timestamp,
+        advice_given=data.advice_given,
+        patient_consent_obtained=data.patient_consent_obtained,
+    )
+    session.add(note)
+    session.flush()
+    session.add(
+        CaseEvent(
+            project_id=case.project_id,
+            case_id=case.id,
+            actor_user_id=actor.id,
+            event_type=CASE_NOTE_RECORDED_EVENT,
+            from_status=case.status,
+            to_status=case.status,
+            meta={"note_id": str(note.id), "note_type": note.note_type},
+        )
+    )
+    record_audit(
+        session,
+        action=AuditAction.CASE_NOTE_RECORDED,
+        actor_user_id=actor.id,
+        project_id=case.project_id,
+        resource_type="case_note",
+        resource_id=str(note.id),
+        from_ip=from_ip,
+        purpose="emergency.case_note",
+        meta={"note_type": note.note_type},
+        commit=False,
+    )
+    session.commit()
+    session.refresh(note)
+    return serialize_note(note)
+
+
+def emergency_kpis(session: Session, *, actor: User, from_ip: str | None) -> dict:
+    if actor.project_id is None:
+        raise AuthError(403, "project_required", "A project-scoped account is required.")
+    cases = session.exec(
+        select(EmergencyCase).where(EmergencyCase.project_id == actor.project_id)
+    ).all()
+    ack_seconds = [
+        (case.acknowledged_at - case.alert_time).total_seconds()
+        for case in cases
+        if case.acknowledged_at is not None
+    ]
+    on_site_seconds = [
+        (case.on_site_at - case.alert_time).total_seconds()
+        for case in cases
+        if case.on_site_at is not None
+    ]
+    record_audit(
+        session,
+        action=AuditAction.EMERGENCY_KPI_READ,
+        actor_user_id=actor.id,
+        project_id=actor.project_id,
+        resource_type="emergency_case",
+        from_ip=from_ip,
+        purpose="emergency.kpis",
+    )
+    return {
+        "project_id": actor.project_id,
+        "total_cases": len(cases),
+        "active_cases": sum(1 for c in cases if c.status != CaseStatus.CLOSED.value),
+        "closed_cases": sum(1 for c in cases if c.status == CaseStatus.CLOSED.value),
+        "average_ack_seconds": _avg(ack_seconds),
+        "average_on_site_seconds": _avg(on_site_seconds),
+    }
+
+
 def serialize_case(session: Session, case: EmergencyCase) -> dict:
     resident = session.get(Resident, case.resident_id)
     user = session.get(User, resident.user_id) if resident else None
@@ -255,9 +573,15 @@ def serialize_case(session: Session, case: EmergencyCase) -> dict:
         "flat_villa_number": resident.flat_villa_number if resident else None,
         "status": case.status,
         "alert_time": case.alert_time,
+        "acknowledged_at": case.acknowledged_at,
+        "en_route_at": case.en_route_at,
+        "on_site_at": case.on_site_at,
+        "escalated_at": case.escalated_at,
+        "closed_at": case.closed_at,
         "symptom_codes": case.symptom_codes,
         "location_text": case.location_text,
         "assigned_doctor_id": case.assigned_doctor_id,
+        "resolved_outcome": case.resolved_outcome,
         "notification_attempts": [
             {
                 "channel": a.channel,
@@ -269,6 +593,115 @@ def serialize_case(session: Session, case: EmergencyCase) -> dict:
             for a in attempts
         ],
     }
+
+
+def serialize_case_detail(session: Session, case: EmergencyCase) -> dict:
+    vitals = session.exec(
+        select(CaseVital)
+        .where(CaseVital.case_id == case.id)
+        .order_by(CaseVital.recorded_at.desc())  # type: ignore[arg-type]
+    ).all()
+    notes = session.exec(
+        select(CaseNote)
+        .where(CaseNote.case_id == case.id)
+        .order_by(CaseNote.created_at.desc())  # type: ignore[arg-type]
+    ).all()
+    events = session.exec(
+        select(CaseEvent)
+        .where(CaseEvent.case_id == case.id)
+        .order_by(CaseEvent.created_at)  # type: ignore[arg-type]
+    ).all()
+    return {
+        **serialize_case(session, case),
+        "vitals": [serialize_vital(v) for v in vitals],
+        "notes": [serialize_note(n) for n in notes],
+        "events": [serialize_event(e) for e in events],
+    }
+
+
+def serialize_vital(vital: CaseVital) -> dict:
+    return {
+        "id": vital.id,
+        "case_id": vital.case_id,
+        "project_id": vital.project_id,
+        "recorded_by": vital.recorded_by,
+        "recorded_at": vital.recorded_at,
+        "blood_pressure_systolic": vital.blood_pressure_systolic,
+        "blood_pressure_diastolic": vital.blood_pressure_diastolic,
+        "spo2_percent": vital.spo2_percent,
+        "heart_rate_bpm": vital.heart_rate_bpm,
+        "respiratory_rate_bpm": vital.respiratory_rate_bpm,
+        "temperature_c": vital.temperature_c,
+        "notes": vital.notes,
+    }
+
+
+def serialize_note(note: CaseNote) -> dict:
+    return {
+        "id": note.id,
+        "case_id": note.case_id,
+        "project_id": note.project_id,
+        "author_id": note.author_id,
+        "note_type": note.note_type,
+        "body": note.body,
+        "doctor_name": note.doctor_name,
+        "doctor_registration_number": note.doctor_registration_number,
+        "consultation_timestamp": note.consultation_timestamp,
+        "advice_given": note.advice_given,
+        "patient_consent_obtained": note.patient_consent_obtained,
+        "created_at": note.created_at,
+    }
+
+
+def serialize_event(event: CaseEvent) -> dict:
+    return {
+        "id": event.id,
+        "case_id": event.case_id,
+        "actor_user_id": event.actor_user_id,
+        "event_type": event.event_type,
+        "from_status": event.from_status,
+        "to_status": event.to_status,
+        "meta": event.meta,
+        "created_at": event.created_at,
+    }
+
+
+def _case_for_staff(
+    session: Session, *, actor: User, case_id: uuid.UUID, lock: bool = False
+) -> EmergencyCase:
+    stmt = select(EmergencyCase).where(
+        EmergencyCase.id == case_id,
+        EmergencyCase.project_id == actor.project_id,
+    )
+    if lock:
+        stmt = stmt.with_for_update()
+    case = session.exec(stmt).first()
+    if case is None:
+        raise AuthError(404, "alert_not_found", "Unknown emergency alert.")
+    return case
+
+
+def _mark_actor_attempts_acknowledged(
+    session: Session, *, case_id: uuid.UUID, actor_id: uuid.UUID
+) -> None:
+    attempts = session.exec(
+        select(NotificationAttempt).where(
+            NotificationAttempt.case_id == case_id,
+            NotificationAttempt.recipient_id == actor_id,
+            NotificationAttempt.status.in_(  # type: ignore[attr-defined]
+                [NotificationStatus.SENT.value, NotificationStatus.DELIVERED.value]
+            ),
+        )
+    ).all()
+    for attempt in attempts:
+        attempt.status = NotificationStatus.ACKNOWLEDGED.value
+        session.add(attempt)
+
+
+def _avg(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return round(sum(values) / len(values), 2)
 
 
 # --------------------------------------------------------------------------- #

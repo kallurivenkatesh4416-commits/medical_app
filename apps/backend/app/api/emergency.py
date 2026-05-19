@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Header, Request
 from pydantic import BaseModel, Field
 from sqlmodel import Session
 
-from app.enums import FallbackChannel, Role
+from app.enums import CaseNoteType, CaseStatus, FallbackChannel, Role
 from app.models.user import User
 from app.security.deps import client_ip, forbid_phi_roles, get_db, require_roles
 from app.services import emergency_service, idempotency
@@ -18,6 +18,8 @@ router = APIRouter(prefix="/api/v1", tags=["emergency"])
 
 resident_only = require_roles(Role.RESIDENT)
 alert_feed_roles = require_roles(Role.DOCTOR, Role.NURSE, Role.OPS)
+lifecycle_roles = require_roles(Role.DOCTOR, Role.NURSE)
+kpi_roles = require_roles(Role.DOCTOR, Role.NURSE, Role.OPS, Role.BUILDER_ADMIN)
 ops_only = require_roles(Role.OPS)
 idempotency_key_header = Header(default=None, alias="Idempotency-Key")
 
@@ -55,10 +57,74 @@ class AlertOut(BaseModel):
     flat_villa_number: str | None
     status: str
     alert_time: datetime
+    acknowledged_at: datetime | None
+    en_route_at: datetime | None
+    on_site_at: datetime | None
+    escalated_at: datetime | None
+    closed_at: datetime | None
     symptom_codes: list[str]
     location_text: str | None
     assigned_doctor_id: uuid.UUID | None
+    resolved_outcome: str | None
     notification_attempts: list[NotificationAttemptOut]
+
+
+class CaseEventOut(BaseModel):
+    id: uuid.UUID
+    case_id: uuid.UUID
+    actor_user_id: uuid.UUID | None
+    event_type: str
+    from_status: str | None
+    to_status: str | None
+    meta: dict
+    created_at: datetime
+
+
+class CaseVitalIn(BaseModel):
+    blood_pressure_systolic: int | None = Field(default=None, ge=40, le=260)
+    blood_pressure_diastolic: int | None = Field(default=None, ge=20, le=180)
+    spo2_percent: int | None = Field(default=None, ge=0, le=100)
+    heart_rate_bpm: int | None = Field(default=None, ge=20, le=260)
+    respiratory_rate_bpm: int | None = Field(default=None, ge=4, le=80)
+    temperature_c: float | None = Field(default=None, ge=25, le=45)
+    notes: str | None = Field(default=None, max_length=240)
+
+
+class CaseVitalOut(CaseVitalIn):
+    id: uuid.UUID
+    case_id: uuid.UUID
+    project_id: uuid.UUID
+    recorded_by: uuid.UUID
+    recorded_at: datetime
+
+
+class CaseNoteIn(BaseModel):
+    note_type: CaseNoteType
+    body: str = Field(min_length=1, max_length=2000)
+    doctor_name: str | None = Field(default=None, max_length=160)
+    doctor_registration_number: str | None = Field(default=None, max_length=80)
+    consultation_timestamp: datetime | None = None
+    advice_given: str | None = Field(default=None, max_length=2000)
+    patient_consent_obtained: bool = False
+
+
+class CaseNoteOut(CaseNoteIn):
+    id: uuid.UUID
+    case_id: uuid.UUID
+    project_id: uuid.UUID
+    author_id: uuid.UUID
+    created_at: datetime
+
+
+class AlertDetailOut(AlertOut):
+    vitals: list[CaseVitalOut]
+    notes: list[CaseNoteOut]
+    events: list[CaseEventOut]
+
+
+class TransitionIn(BaseModel):
+    target_status: CaseStatus
+    resolved_outcome: str | None = Field(default=None, max_length=240)
 
 
 class CaseStatusOut(BaseModel):
@@ -88,6 +154,15 @@ class FallbackTapOut(BaseModel):
 
 class EscalationRunOut(BaseModel):
     escalated_case_ids: list[uuid.UUID]
+
+
+class EmergencyKpiOut(BaseModel):
+    project_id: uuid.UUID
+    total_cases: int
+    active_cases: int
+    closed_cases: int
+    average_ack_seconds: float | None
+    average_on_site_seconds: float | None
 
 
 @router.post("/devices/push-token", response_model=PushTokenOut)
@@ -158,6 +233,113 @@ def active_emergency_alerts(
 ) -> list[dict]:
     return emergency_service.list_active_alerts(
         session, actor=actor, from_ip=client_ip(request)
+    )
+
+
+@router.get("/emergency/kpis", response_model=EmergencyKpiOut)
+def emergency_kpis(
+    request: Request,
+    actor: User = Depends(kpi_roles),
+    session: Session = Depends(get_db),
+) -> dict:
+    return emergency_service.emergency_kpis(
+        session, actor=actor, from_ip=client_ip(request)
+    )
+
+
+@router.get(
+    "/emergency/alerts/{case_id}",
+    response_model=AlertDetailOut,
+    dependencies=[Depends(forbid_phi_roles)],
+)
+def emergency_case_detail(
+    case_id: uuid.UUID,
+    request: Request,
+    actor: User = Depends(alert_feed_roles),
+    session: Session = Depends(get_db),
+) -> dict:
+    return emergency_service.read_case_detail(
+        session, actor=actor, case_id=case_id, from_ip=client_ip(request)
+    )
+
+
+@router.post(
+    "/emergency/alerts/{case_id}/transition",
+    response_model=AlertOut,
+    dependencies=[Depends(forbid_phi_roles)],
+)
+def transition_emergency_case(
+    case_id: uuid.UUID,
+    body: TransitionIn,
+    request: Request,
+    actor: User = Depends(lifecycle_roles),
+    session: Session = Depends(get_db),
+) -> dict:
+    return emergency_service.transition_case(
+        session,
+        actor=actor,
+        case_id=case_id,
+        target_status=body.target_status,
+        resolved_outcome=body.resolved_outcome,
+        from_ip=client_ip(request),
+    )
+
+
+@router.post(
+    "/emergency/alerts/{case_id}/vitals",
+    response_model=CaseVitalOut,
+    dependencies=[Depends(forbid_phi_roles)],
+)
+def record_case_vitals(
+    case_id: uuid.UUID,
+    body: CaseVitalIn,
+    request: Request,
+    actor: User = Depends(lifecycle_roles),
+    session: Session = Depends(get_db),
+) -> dict:
+    return emergency_service.record_vitals(
+        session,
+        actor=actor,
+        case_id=case_id,
+        data=emergency_service.VitalInput(
+            blood_pressure_systolic=body.blood_pressure_systolic,
+            blood_pressure_diastolic=body.blood_pressure_diastolic,
+            spo2_percent=body.spo2_percent,
+            heart_rate_bpm=body.heart_rate_bpm,
+            respiratory_rate_bpm=body.respiratory_rate_bpm,
+            temperature_c=body.temperature_c,
+            notes=body.notes,
+        ),
+        from_ip=client_ip(request),
+    )
+
+
+@router.post(
+    "/emergency/alerts/{case_id}/notes",
+    response_model=CaseNoteOut,
+    dependencies=[Depends(forbid_phi_roles)],
+)
+def record_case_note(
+    case_id: uuid.UUID,
+    body: CaseNoteIn,
+    request: Request,
+    actor: User = Depends(lifecycle_roles),
+    session: Session = Depends(get_db),
+) -> dict:
+    return emergency_service.record_case_note(
+        session,
+        actor=actor,
+        case_id=case_id,
+        data=emergency_service.NoteInput(
+            note_type=body.note_type,
+            body=body.body,
+            doctor_name=body.doctor_name,
+            doctor_registration_number=body.doctor_registration_number,
+            consultation_timestamp=body.consultation_timestamp,
+            advice_given=body.advice_given,
+            patient_consent_obtained=body.patient_consent_obtained,
+        ),
+        from_ip=client_ip(request),
     )
 
 

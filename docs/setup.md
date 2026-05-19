@@ -40,6 +40,9 @@ Then:
   (numbers from `/emergency/alerts/{id}/fallback-numbers`; 108/112 always
   reachable offline). Real Twilio/FCM delivery needs `PROVIDER_MODE=live`
   plus the Twilio + FCM keys in `.env`.
+- Slice 7: the dashboard can drive case lifecycle transitions, record vitals,
+  and add Telemedicine-complete notes. `GET /api/v1/emergency/kpis` returns
+  PHI-free project aggregates for operational dashboards.
 
 ## Backend dev (without Docker)
 
@@ -67,9 +70,9 @@ real SMS provider. Seeded demo phones are `+15550000001`…`+15550000009`
 See `.env.example` (annotated). Provider keys (Twilio/FCM/AWS) are only needed from
 the slice that uses them; default `PROVIDER_MODE=stub` needs no external accounts.
 
-_Status: Slices 1-6 cover backend foundation, auth/RBAC/audit,
+_Status: Slices 1-7 cover backend foundation, auth/RBAC/audit,
 onboarding/consent/profile, medical-record upload/list/link, the emergency
 happy path with dashboard feed, and emergency hardening (3-channel fan-out,
 on-call resolution, 60s backup escalation, mobile offline retry + fallback
-sheet). Live Twilio/FCM is verified with operator keys. Case lifecycle is
-Slice 7._
+sheet), plus case lifecycle, vitals, notes, and aggregate emergency KPIs. Live
+Twilio/FCM is verified with operator keys. Hospital handover PDF is Slice 8._

@@ -7,7 +7,14 @@ from sqlalchemy import event
 from app.models.audit import AuditLog
 from app.models.auth import OtpCode, RefreshToken
 from app.models.consent import Consent
-from app.models.emergency import CaseEvent, DeviceToken, EmergencyCase, NotificationAttempt
+from app.models.emergency import (
+    CaseEvent,
+    CaseNote,
+    CaseVital,
+    DeviceToken,
+    EmergencyCase,
+    NotificationAttempt,
+)
 from app.models.emergency_contact import EmergencyContact
 from app.models.idempotency import IdempotencyKey
 from app.models.medical_profile import MedicalProfile
@@ -23,6 +30,8 @@ __all__ = [
     "RefreshToken",
     "Consent",
     "CaseEvent",
+    "CaseNote",
+    "CaseVital",
     "DeviceToken",
     "EmergencyContact",
     "EmergencyCase",
