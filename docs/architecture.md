@@ -20,7 +20,24 @@ fires push + SMS + voice in parallel; each logs independently to
 
 ## Emergency data flow
 
-To be diagrammed in Slice 5–6 (button → idempotent API → `emergency_case` →
-parallel fan-out → dashboard live feed → lifecycle → handover PDF).
+Slice 5 local happy path:
 
-_Status: skeleton (Slice 1). Filled per slice._
+```mermaid
+sequenceDiagram
+    participant Resident
+    participant API as FastAPI
+    participant DB as Postgres/SQLite
+    participant Push as NotificationGateway
+    participant Dashboard
+    Resident->>API: POST /api/v1/emergency/alerts (Idempotency-Key)
+    API->>DB: emergency_case(alerted) + case_events + audit_log
+    API->>Push: send_push(primary doctor token)
+    API->>DB: notification_attempts(fcm sent/failed)
+    Dashboard->>API: GET /api/v1/emergency/alerts/active
+    API->>Dashboard: tenant-scoped active alerts
+```
+
+Slice 6 extends this to parallel SMS + voice, on-call schedules, backup
+escalation, mobile offline retry, and fallback dialing.
+
+_Status: filled through Slice 5._

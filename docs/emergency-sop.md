@@ -23,4 +23,13 @@
 - Device offline → local queue, retry every 5s, visible "Alert sent / Retrying".
 - Backend unreachable past 60s → fallback action sheet with `tel:` dialer.
 
-_Status: skeleton (Slice 1). Fully specified by end of Slice 6._
+## Slice 5 status
+
+- Implemented happy path: resident creates an idempotent alert, backend records
+  `emergency_case(status=alerted)`, writes `case_events.alert_created`, attempts
+  one FCM push to the primary active doctor, logs `notification_attempts`, and
+  exposes the doctor/nurse/ops active-alert feed.
+- The dashboard polls `/api/v1/emergency/alerts/active` and shows the live red
+  alert banner once a doctor token is supplied.
+- Still Slice 6: SMS, voice, active `on_call_schedules`, backup escalation,
+  mobile offline queue/retry, and the 60s fallback action sheet.

@@ -27,6 +27,9 @@ Then:
   local blobs under `LOCAL_STORAGE_DIR`; signed links are served by the backend
   and capped at 15 minutes. `PROVIDER_MODE=live` uses S3/LocalStack via
   `S3_ENDPOINT_URL`.
+- Slice 5 dashboard feed: login as a seeded doctor, paste the access token into
+  the dashboard, then create a resident alert via `POST /api/v1/emergency/alerts`.
+  In `PROVIDER_MODE=stub`, the push attempt is logged as `stub-push`.
 
 ## Backend dev (without Docker)
 
@@ -54,5 +57,6 @@ real SMS provider. Seeded demo phones are `+15550000001`…`+15550000009`
 See `.env.example` (annotated). Provider keys (Twilio/FCM/AWS) are only needed from
 the slice that uses them; default `PROVIDER_MODE=stub` needs no external accounts.
 
-_Status: Slices 1-4 cover backend foundation, auth/RBAC/audit, onboarding/consent/profile,
-and medical-record upload/list/link. Dashboard/mobile steps added per slice._
+_Status: Slices 1-5 cover backend foundation, auth/RBAC/audit,
+onboarding/consent/profile, medical-record upload/list/link, and the emergency
+happy path with dashboard feed. Mobile emergency/offline steps continue in Slice 6._

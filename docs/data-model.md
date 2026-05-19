@@ -50,4 +50,13 @@
   `idempotency_keys.resource_id` points at the created record for exact upload
   replay. Object bytes live outside the DB in the `StorageGateway`.
 
+- **Slice 5** (migration `0005_emergency_happy_path`):
+  `emergency_cases` records the resident, project, assigned doctor, alerted
+  status, alert timestamp, optional symptoms/location, and future lifecycle
+  timestamps. `notification_attempts` stores the Slice 5 FCM push attempt
+  status/provider reference/error without message body. `case_events` records
+  the initial `alert_created` transition for the timeline/KPI feed. `device_tokens`
+  stores staff push tokens for the local/dashboard happy path. Emergency alert
+  idempotency also uses `idempotency_keys.resource_id`.
+
 _Schema continues to grow per slice._

@@ -38,6 +38,30 @@ class MedicalRecordType(StrEnum):
     DISCHARGE = "discharge"
 
 
+class CaseStatus(StrEnum):
+    ALERTED = "alerted"
+    ACKNOWLEDGED = "acknowledged"
+    EN_ROUTE = "en_route"
+    ON_SITE = "on_site"
+    TREATED_ON_SITE = "treated_on_site"
+    ESCALATED = "escalated"
+    CLOSED = "closed"
+
+
+class NotificationChannel(StrEnum):
+    FCM = "fcm"
+    SMS = "sms"
+    VOICE = "voice"
+
+
+class NotificationStatus(StrEnum):
+    QUEUED = "queued"
+    SENT = "sent"
+    DELIVERED = "delivered"
+    FAILED = "failed"
+    ACKNOWLEDGED = "acknowledged"
+
+
 class ConsentType(StrEnum):
     DATA_STORAGE = "data_storage"
     EMERGENCY_SHARE_WITH_DOCTOR = "emergency_share_with_doctor"
@@ -81,3 +105,5 @@ class AuditAction(StrEnum):
     RECORD_UPLOADED = "record_uploaded"
     RECORD_LIST = "record_list"
     RECORD_LINK_ISSUED = "record_link_issued"
+    EMERGENCY_ALERT_CREATED = "emergency_alert_created"
+    EMERGENCY_ALERT_LIST = "emergency_alert_list"

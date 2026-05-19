@@ -89,6 +89,21 @@
   same metadata returns the original record; owner/body mismatch returns
   `idempotency_key_conflict`.
 
+## Slice 5 implementation notes (emergency happy path)
+
+- `POST /emergency/alerts` requires `Idempotency-Key`; exact replay returns the
+  original case, while owner/body mismatch returns `idempotency_key_conflict`.
+- Slice 5 fans out only the first channel: FCM push to the primary active doctor
+  in the resident's project. SMS, voice, backup escalation, and offline retry are
+  explicitly Slice 6.
+- `notification_attempts` stores channel/status/provider reference/error only.
+  The stub gateway logs no alert body, symptoms, or patient history.
+- The active dashboard feed is restricted to doctor/nurse/ops, blocks
+  builder/security roles, and is tenant-scoped. Security-desk minimum-necessary
+  alert payload remains a Slice 6/legal-review boundary.
+- Alert creation writes both `audit_log` (`EMERGENCY_ALERT_CREATED`) and
+  `case_events` (`alert_created`) so the lifecycle timeline starts at the tap.
+
 ## Open questions — `[NEEDS_LEGAL_REVIEW]`
 
 1. `[NEEDS_LEGAL_REVIEW]` DPDP cross-border data: acceptable AWS S3 region for

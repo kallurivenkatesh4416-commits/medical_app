@@ -37,6 +37,9 @@
 | GET | `/api/v1/residents/{resident_id}/records` | 4 | staff list (doctor/nurse/ops; PHI-blocked, tenant-isolated, consent-gated, audited) |
 | GET | `/api/v1/residents/{resident_id}/records/{id}/link` | 4 | staff signed download link; same guards as staff list |
 | GET | `/api/v1/records/download/{token}` | 4 | local stub signed-link download; invalid/tampered/expired tokens return 401 |
+| POST | `/api/v1/devices/push-token` | 5 | doctor/nurse/ops registers a push token for alert fan-out |
+| POST | `/api/v1/emergency/alerts` | 5 | resident creates an idempotent emergency alert; records case + push attempt |
+| GET | `/api/v1/emergency/alerts/active` | 5 | doctor/nurse/ops active alert feed; PHI-blocked and tenant-scoped |
 
 Auth: `Authorization: Bearer <access>`. Access tokens are short-lived JWTs;
 refresh tokens are opaque, stored hashed, rotated on every use.
