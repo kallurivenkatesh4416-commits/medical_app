@@ -103,6 +103,10 @@
   alert payload remains a Slice 6/legal-review boundary.
 - Alert creation writes both `audit_log` (`EMERGENCY_ALERT_CREATED`) and
   `case_events` (`alert_created`) so the lifecycle timeline starts at the tap.
+- The case/event/audit/idempotency rows are committed before any push is sent;
+  a queued `notification_attempts` row is committed before the gateway call and
+  then updated to sent/failed. A provider crash cannot leave only an external
+  notification with no persisted case.
 
 ## Open questions — `[NEEDS_LEGAL_REVIEW]`
 

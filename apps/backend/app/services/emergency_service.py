@@ -1,7 +1,8 @@
 """Emergency happy path service (PLAN.md Slice 5).
 
-Creates an alerted case, records the initial case event, and sends one FCM push
-to the current primary doctor. SMS/voice/backup escalation land in Slice 6.
+Creates an alerted case, commits the case/event/audit/idempotency rows, then
+records a queued notification attempt before sending one FCM push to the current
+primary doctor. SMS/voice/backup escalation land in Slice 6.
 """
 
 import uuid
@@ -132,14 +133,13 @@ def create_alert(
             resource_id=case.id,
         )
 
-    _stage_push_attempt(session, case=case, doctor=doctor)
-
     try:
         session.commit()
     except IntegrityError as exc:
         session.rollback()
         raise AuthError(409, "alert_create_conflict", "Emergency alert conflicted.") from exc
     session.refresh(case)
+    _record_push_attempt(session, case=case, doctor=doctor)
     return case
 
 
@@ -239,7 +239,7 @@ def _push_token_for(session: Session, doctor: User) -> DeviceToken | None:
     ).first()
 
 
-def _stage_push_attempt(
+def _record_push_attempt(
     session: Session, *, case: EmergencyCase, doctor: User | None
 ) -> None:
     attempt = NotificationAttempt(
@@ -247,19 +247,27 @@ def _stage_push_attempt(
         case_id=case.id,
         channel=NotificationChannel.FCM.value,
         recipient_id=doctor.id if doctor else None,
-        status=NotificationStatus.FAILED.value,
+        status=NotificationStatus.QUEUED.value,
         attempted_at=utcnow(),
     )
     if doctor is None:
         attempt.error = "no_active_doctor"
+        attempt.status = NotificationStatus.FAILED.value
         session.add(attempt)
+        session.commit()
         return
 
     token = _push_token_for(session, doctor)
     if token is None:
         attempt.error = "no_push_token"
+        attempt.status = NotificationStatus.FAILED.value
         session.add(attempt)
+        session.commit()
         return
+
+    session.add(attempt)
+    session.commit()
+    session.refresh(attempt)
 
     try:
         attempt.provider_ref = get_notification_gateway().send_push(
@@ -272,3 +280,4 @@ def _stage_push_attempt(
         attempt.error = exc.__class__.__name__
         attempt.status = NotificationStatus.FAILED.value
     session.add(attempt)
+    session.commit()

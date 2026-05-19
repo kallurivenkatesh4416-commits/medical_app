@@ -1,14 +1,17 @@
 """Slice 5 — emergency happy path: idempotent alert + push + feed."""
 
 from fastapi.testclient import TestClient
+from sqlalchemy import event
+from sqlalchemy.orm import Session as OrmSession
 from sqlmodel import Session, select
 
 from app.enums import AuditAction, CaseStatus, NotificationChannel, NotificationStatus, Role
 from app.models.audit import AuditLog
-from app.models.emergency import CaseEvent, EmergencyCase, NotificationAttempt
+from app.models.emergency import CaseEvent, DeviceToken, EmergencyCase, NotificationAttempt
 from app.models.project import Project
 from app.models.resident import Resident
 from app.models.user import User
+from app.services import emergency_service
 
 
 def _register_token(client: TestClient, phone: str) -> str:
@@ -230,3 +233,47 @@ def test_alert_still_creates_case_when_doctor_has_no_push_token(
     attempt = session.exec(select(NotificationAttempt)).first()
     assert attempt.status == NotificationStatus.FAILED.value
     assert attempt.error == "no_push_token"
+
+
+def test_push_is_sent_after_case_commit(
+    client: TestClient, project: Project, session: Session, make_user, login, monkeypatch
+) -> None:
+    resident_token, _ = _onboard(client, project, session, "+15559990005")
+    doctor = make_user(Role.DOCTOR, phone="+15559991116")
+    _register_doctor_push(client, _auth(client, login, doctor))
+
+    events: list[str] = []
+
+    class Gateway:
+        def send_push(self, *, token: str, title: str, body: str) -> str:
+            events.append("push")
+            return "ordered-push"
+
+    def after_commit(_session) -> None:  # noqa: ANN001
+        events.append("commit")
+
+    monkeypatch.setattr(emergency_service, "get_notification_gateway", lambda: Gateway())
+    event.listen(OrmSession, "after_commit", after_commit)
+    try:
+        resp = client.post(
+            "/api/v1/emergency/alerts",
+            json={"symptom_codes": ["fall"]},
+            headers={
+                "Authorization": f"Bearer {resident_token}",
+                "Idempotency-Key": "ordered",
+            },
+        )
+    finally:
+        event.remove(OrmSession, "after_commit", after_commit)
+
+    assert resp.status_code == 200, resp.text
+    assert events[:3] == ["commit", "commit", "push"]
+    case = session.exec(select(EmergencyCase)).first()
+    assert case is not None
+    attempts = session.exec(select(NotificationAttempt)).all()
+    assert len(attempts) == 1
+    assert attempts[0].status == NotificationStatus.SENT.value
+    assert attempts[0].provider_ref == "ordered-push"
+
+    token = session.exec(select(DeviceToken).where(DeviceToken.user_id == doctor.id)).first()
+    assert token is not None
