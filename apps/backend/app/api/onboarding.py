@@ -8,14 +8,16 @@ import uuid
 from datetime import date
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Header, Request
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.enums import ConsentType
 from app.models.project import Project
+from app.models.user import User
 from app.security.deps import client_ip, get_db, get_registration_phone
-from app.services import auth_service
+from app.services import auth_service, idempotency
+from app.services.auth_service import AuthError
 from app.services.onboarding_service import (
     ContactInput,
     OnboardingInput,
@@ -80,9 +82,26 @@ def onboarding_complete(
     body: OnboardingIn,
     request: Request,
     phone: str = Depends(get_registration_phone),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     session: Session = Depends(get_db),
 ) -> OnboardingOut:
     ip = client_ip(request)
+
+    def _tokens_for(user: User) -> OnboardingOut:
+        access, refresh = auth_service.login_user(session, user=user, from_ip=ip)
+        return OnboardingOut(access_token=access, refresh_token=refresh)
+
+    # Idempotent replay: a prior success with this key returns a working
+    # session (fresh tokens — secrets are never stored at rest), not a 409.
+    if idempotency_key:
+        prior = idempotency.find(
+            session, idempotency.ONBOARDING_ENDPOINT, idempotency_key
+        )
+        if prior is not None and prior.user_id is not None:
+            existing = session.get(User, prior.user_id)
+            if existing is not None:
+                return _tokens_for(existing)
+
     data = OnboardingInput(
         full_name=body.full_name,
         dob=body.dob,
@@ -107,6 +126,22 @@ def onboarding_complete(
         preferred_hospital=body.preferred_hospital,
         insurance=body.insurance,
     )
-    user = complete_onboarding(session, phone=phone, data=data, from_ip=ip)
-    access, refresh = auth_service.login_user(session, user=user, from_ip=ip)
-    return OnboardingOut(access_token=access, refresh_token=refresh)
+    try:
+        user = complete_onboarding(
+            session,
+            phone=phone,
+            data=data,
+            from_ip=ip,
+            idempotency_key=idempotency_key,
+        )
+    except AuthError as exc:
+        # Concurrent racer with the same key won the create — replay rather
+        # than surfacing the duplicate to a retrying client.
+        if idempotency_key and exc.code == "already_registered":
+            existing = session.exec(
+                select(User).where(User.phone == phone)
+            ).first()
+            if existing is not None:
+                return _tokens_for(existing)
+        raise
+    return _tokens_for(user)

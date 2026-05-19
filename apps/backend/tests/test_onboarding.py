@@ -8,6 +8,8 @@ from sqlmodel import Session, select
 from app.enums import AuditAction, ConsentType, Role
 from app.models.audit import AuditLog
 from app.models.project import Project
+from app.models.resident import Resident
+from app.models.user import User
 
 
 def _register_token(client: TestClient, phone: str) -> str:
@@ -204,7 +206,7 @@ def test_phi_roles_cannot_view_resident_profile(
 
 
 def test_revoking_data_storage_closes_account(
-    client: TestClient, project: Project
+    client: TestClient, project: Project, session: Session
 ) -> None:
     onboard = _onboard(client, project, "+15556660009")
     access = onboard.json()["access_token"]
@@ -223,3 +225,41 @@ def test_revoking_data_storage_closes_account(
         client.post("/api/v1/auth/refresh", json={"refresh_token": refresh}).status_code
         == 401
     )
+
+    # Closure is atomic with its audit trail: both rows are present.
+    actions = list(session.exec(select(AuditLog.action)).all())
+    assert actions.count(AuditAction.ACCOUNT_CLOSURE_INITIATED.value) == 1
+    assert AuditAction.CONSENT_REVOKED.value in actions
+
+
+def test_onboarding_is_idempotent_with_key(
+    client: TestClient, project: Project, session: Session
+) -> None:
+    tok = _register_token(client, "+15556660010")
+    headers = {
+        "Authorization": f"Bearer {tok}",
+        "Idempotency-Key": "onboard-key-abc",
+    }
+    payload = _payload(str(project.id))
+
+    first = client.post(
+        "/api/v1/onboarding/complete", json=payload, headers=headers
+    )
+    assert first.status_code == 200, first.text
+
+    # Same key (lost-response retry) -> 200 with a working session, not 409.
+    retry = client.post(
+        "/api/v1/onboarding/complete", json=payload, headers=headers
+    )
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["access_token"]
+
+    # Exactly one account + one resident created.
+    users = session.exec(
+        select(User).where(User.phone == "+15556660010")
+    ).all()
+    assert len(users) == 1
+    residents = session.exec(
+        select(Resident).where(Resident.user_id == users[0].id)
+    ).all()
+    assert len(residents) == 1

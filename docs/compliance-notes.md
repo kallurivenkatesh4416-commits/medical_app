@@ -52,6 +52,16 @@
 - Staff are tenant-isolated: a resident outside the actor's project returns
   404 (no existence leak).
 
+### Slice 3 review fixes
+
+- data_storage account closure is now atomic: consent revoke + user
+  soft-delete + refresh-token revocation + `CONSENT_REVOKED` +
+  `ACCOUNT_CLOSURE_INITIATED` audit rows all commit in one transaction (no
+  closed-without-audit window).
+- Onboarding idempotency: `idempotency_keys` stores only the created
+  `user_id`, never access/refresh tokens (no secrets at rest); a retried
+  request re-issues fresh tokens for the same account rather than 409.
+
 ## Open questions — `[NEEDS_LEGAL_REVIEW]`
 
 1. `[NEEDS_LEGAL_REVIEW]` DPDP cross-border data: acceptable AWS S3 region for

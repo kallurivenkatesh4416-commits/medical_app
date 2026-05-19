@@ -36,4 +36,9 @@
   + profile + contacts + consents + audit in **one transaction**. Revoking
   `data_storage` soft-deletes the user and revokes all refresh tokens.
 
+- **Slice 3 review** (migration `0003_idempotency`): `idempotency_keys`
+  (unique `endpoint`+`key`, stores only the created `user_id` — never tokens).
+  Backs the brief §10 idempotency convention; onboarding records its key in the
+  same transaction as the account so create + key commit atomically.
+
 _Schema continues to grow per slice._

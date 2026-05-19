@@ -173,7 +173,9 @@ def login_user(
     return access, refresh
 
 
-def _revoke_all_user_refresh(session: Session, user_id: uuid.UUID) -> None:
+def _revoke_all_user_refresh(
+    session: Session, user_id: uuid.UUID, *, commit: bool = True
+) -> None:
     tokens = session.exec(
         select(RefreshToken).where(
             RefreshToken.user_id == user_id,
@@ -183,7 +185,11 @@ def _revoke_all_user_refresh(session: Session, user_id: uuid.UUID) -> None:
     for t in tokens:
         t.revoked_at = _now()
         session.add(t)
-    session.commit()
+    if commit:
+        session.commit()
+    else:
+        # Caller batches this into a larger atomic transaction.
+        session.flush()
 
 
 def rotate_refresh(

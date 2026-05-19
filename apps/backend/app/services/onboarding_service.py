@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import date
 
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.enums import (
@@ -24,6 +25,7 @@ from app.models.medical_profile import MedicalProfile
 from app.models.project import Project
 from app.models.resident import Resident
 from app.models.user import User
+from app.services import idempotency
 from app.services.audit import record_audit
 from app.services.auth_service import AuthError
 
@@ -55,7 +57,12 @@ class OnboardingInput:
 
 
 def complete_onboarding(
-    session: Session, *, phone: str, data: OnboardingInput, from_ip: str | None
+    session: Session,
+    *,
+    phone: str,
+    data: OnboardingInput,
+    from_ip: str | None,
+    idempotency_key: str | None = None,
 ) -> User:
     if not data.disclaimer_acknowledged:
         raise AuthError(422, "disclaimer_required", "The safety disclaimer must be acknowledged.")
@@ -171,7 +178,24 @@ def complete_onboarding(
         commit=False,
     )
 
-    # One commit: account + profile + contacts + consents + audit, atomically.
-    session.commit()
+    if idempotency_key:
+        idempotency.stage(
+            session,
+            endpoint=idempotency.ONBOARDING_ENDPOINT,
+            key=idempotency_key,
+            user_id=user.id,
+        )
+
+    # One commit: account + profile + contacts + consents + audit (+ idempotency
+    # key) atomically. A concurrent same-phone/same-key racer trips a unique
+    # constraint here; surface it as the normal duplicate so the API layer can
+    # replay idempotently.
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise AuthError(
+            409, "already_registered", "An account already exists for this number."
+        ) from exc
     session.refresh(user)
     return user

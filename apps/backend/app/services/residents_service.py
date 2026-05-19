@@ -164,7 +164,9 @@ def update_consent(
         user.is_active = False
         user.deleted_at = now
         session.add(user)
-        _revoke_all_user_refresh(session, user.id)
+        # Stage-only: consent + user soft-delete + token revocation + both
+        # audit rows must all commit together (or not at all).
+        _revoke_all_user_refresh(session, user.id, commit=False)
         record_audit(
             session,
             action=AuditAction.CONSENT_REVOKED,

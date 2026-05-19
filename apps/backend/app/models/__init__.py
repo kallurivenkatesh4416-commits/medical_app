@@ -8,6 +8,7 @@ from app.models.audit import AuditLog
 from app.models.auth import OtpCode, RefreshToken
 from app.models.consent import Consent
 from app.models.emergency_contact import EmergencyContact
+from app.models.idempotency import IdempotencyKey
 from app.models.medical_profile import MedicalProfile
 from app.models.project import Project
 from app.models.resident import Resident
@@ -19,6 +20,7 @@ __all__ = [
     "RefreshToken",
     "Consent",
     "EmergencyContact",
+    "IdempotencyKey",
     "MedicalProfile",
     "Project",
     "Resident",
