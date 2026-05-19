@@ -149,14 +149,24 @@ def onboarding_complete(
             idem_ctx=ctx,
         )
     except AuthError as exc:
-        # Concurrent racer with the same key won the create — replay rather
-        # than surfacing the duplicate to a retrying client. Safe: we look up
-        # by the CURRENT verified phone, never by the key alone.
+        # A concurrent racer with the SAME key+owner+body won the create.
+        # Replay only if a committed idempotency row exactly matches this
+        # owner+request — never just because the phone now exists (a new key,
+        # or a changed body, against a registered phone must still 409).
         if ctx is not None and exc.code == "already_registered":
-            existing = session.exec(
-                select(User).where(User.phone == phone)
-            ).first()
-            if existing is not None:
-                return _tokens_for(existing)
+            try:
+                prior = idempotency.check_replay(
+                    session, idempotency.ONBOARDING_ENDPOINT, ctx
+                )
+            except idempotency.IdempotencyConflict as conflict:
+                raise AuthError(
+                    409,
+                    "idempotency_key_conflict",
+                    "This Idempotency-Key was used with a different request or account.",
+                ) from conflict
+            if prior is not None and prior.user_id is not None:
+                existing = session.get(User, prior.user_id)
+                if existing is not None:
+                    return _tokens_for(existing)
         raise
     return _tokens_for(user)

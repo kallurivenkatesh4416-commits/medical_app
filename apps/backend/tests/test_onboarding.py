@@ -294,6 +294,40 @@ def test_idempotency_key_is_owner_bound(
     )
 
 
+def test_new_key_after_success_is_not_replayed(
+    client: TestClient, project: Project
+) -> None:
+    tok = _register_token(client, "+15556660014")
+
+    ok = client.post(
+        "/api/v1/onboarding/complete",
+        json=_payload(str(project.id)),
+        headers={"Authorization": f"Bearer {tok}", "Idempotency-Key": "first-key"},
+    )
+    assert ok.status_code == 200
+
+    # Same (still valid) registration token, a DIFFERENT key + changed body.
+    # The phone is registered but this key never created it -> must 409, must
+    # NOT mint fresh tokens.
+    reused = client.post(
+        "/api/v1/onboarding/complete",
+        json=_payload(str(project.id), full_name="Sneaky Rename"),
+        headers={"Authorization": f"Bearer {tok}", "Idempotency-Key": "new-key"},
+    )
+    assert reused.status_code == 409
+    assert reused.json()["error"]["code"] == "already_registered"
+    assert "access_token" not in reused.json()
+
+    # A new key with the SAME body is still a genuine duplicate, not a replay.
+    again = client.post(
+        "/api/v1/onboarding/complete",
+        json=_payload(str(project.id)),
+        headers={"Authorization": f"Bearer {tok}", "Idempotency-Key": "another"},
+    )
+    assert again.status_code == 409
+    assert "access_token" not in again.json()
+
+
 def test_idempotency_same_key_different_body_conflicts(
     client: TestClient, project: Project
 ) -> None:
