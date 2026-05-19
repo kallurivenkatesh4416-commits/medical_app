@@ -309,9 +309,11 @@ def test_one_channel_exception_does_not_block_the_others(
     assert by_channel[NotificationChannel.VOICE.value][0].status == "sent"
 
 
-def test_push_is_sent_after_case_commit(
+def test_case_and_queued_attempts_commit_before_any_send(
     client: TestClient, project: Project, session: Session, make_user, login, monkeypatch
 ) -> None:
+    """Durability contract: the case + its queued attempts commit atomically
+    in one transaction; only then does any provider call happen."""
     resident_token, _ = _onboard(client, project, session, "+15559990005")
     doctor = make_user(Role.DOCTOR, phone="+15559991116")
     _register_doctor_push(client, _auth(client, login, doctor))
@@ -347,10 +349,53 @@ def test_push_is_sent_after_case_commit(
         event.remove(OrmSession, "after_commit", after_commit)
 
     assert resp.status_code == 200, resp.text
-    # case/event/audit/idem commit, then the queued FCM row commits, then push.
-    assert events[:3] == ["commit", "commit", "push"]
+    # The case (+ all queued attempts) is durable before the first send.
+    assert events[0] == "commit"
+    assert "push" in events
+    assert events.index("commit") < events.index("push")
     attempts = session.exec(select(NotificationAttempt)).all()
     assert len(attempts) == 3
+    assert {a.status for a in attempts} == {NotificationStatus.SENT.value}
+
+
+def test_queued_attempts_are_durable_and_resume_on_replay(
+    client: TestClient, project: Project, session: Session, make_user, login, monkeypatch
+) -> None:
+    """A crash after the case commit but before delivery leaves persisted
+    queued attempts; the idempotent retry resumes and finishes delivery."""
+    resident_token, _ = _onboard(client, project, session, "+15559990030")
+    doctor = make_user(Role.DOCTOR, phone="+15559991230")
+    _register_doctor_push(client, _auth(client, login, doctor))
+    headers = {
+        "Authorization": f"Bearer {resident_token}",
+        "Idempotency-Key": "resume",
+    }
+    body = {"symptom_codes": ["fall"]}
+
+    # Simulate a crash between the commit and delivery.
+    monkeypatch.setattr(emergency_service, "_deliver_pending", lambda *a, **k: None)
+    first = client.post("/api/v1/emergency/alerts", json=body, headers=headers)
+    assert first.status_code == 200, first.text
+    attempts = session.exec(select(NotificationAttempt)).all()
+    assert len(attempts) == 3
+    assert {a.status for a in attempts} == {NotificationStatus.QUEUED.value}
+    assert len(session.exec(select(EmergencyCase)).all()) == 1
+
+    # Recover: the retried request resumes the outbox and delivers.
+    monkeypatch.undo()
+    replay = client.post("/api/v1/emergency/alerts", json=body, headers=headers)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["id"] == first.json()["id"]
+    session.expire_all()
+    after = _by_channel(session)
+    assert all(
+        a.status != NotificationStatus.QUEUED.value
+        for rows in after.values()
+        for a in rows
+    )
+    assert after[NotificationChannel.SMS.value][0].status == "sent"
+    assert after[NotificationChannel.VOICE.value][0].status == "sent"
+    assert len(session.exec(select(EmergencyCase)).all()) == 1
 
 
 def test_on_call_schedule_overrides_first_active_doctor(
@@ -630,6 +675,113 @@ def test_security_desk_gets_minimal_payload_only_when_opted_in(
     # notification_attempts never persists a body / symptoms / history.
     assert not hasattr(desk_attempts[0], "body")
     assert desk_attempts[0].error is None
+
+
+def test_case_status_is_owner_scoped_and_reflects_ack(
+    client: TestClient, project: Project, session: Session, make_user
+) -> None:
+    owner_token, _ = _onboard(client, project, session, "+15559990040")
+    make_user(Role.DOCTOR, phone="+15559991240")
+    created = client.post(
+        "/api/v1/emergency/alerts",
+        json={"symptom_codes": ["fall"]},
+        headers={
+            "Authorization": f"Bearer {owner_token}",
+            "Idempotency-Key": "status",
+        },
+    )
+    case_id = created.json()["id"]
+
+    s = client.get(
+        f"/api/v1/emergency/alerts/{case_id}/status",
+        headers={"Authorization": f"Bearer {owner_token}"},
+    )
+    assert s.status_code == 200, s.text
+    assert s.json() == {
+        "case_id": case_id,
+        "status": CaseStatus.ALERTED.value,
+        "acknowledged": False,
+    }
+
+    # A non-owner resident gets 404 (no existence leak).
+    other_token, _ = _onboard(client, project, session, "+15559990041")
+    other = client.get(
+        f"/api/v1/emergency/alerts/{case_id}/status",
+        headers={"Authorization": f"Bearer {other_token}"},
+    )
+    assert other.status_code == 404
+
+    # Once acknowledged, the resident sees it (drives the fallback countdown).
+    case = session.get(EmergencyCase, uuid.UUID(case_id))
+    case.acknowledged_at = utcnow()
+    case.status = CaseStatus.ACKNOWLEDGED.value
+    session.add(case)
+    session.commit()
+    s2 = client.get(
+        f"/api/v1/emergency/alerts/{case_id}/status",
+        headers={"Authorization": f"Bearer {owner_token}"},
+    )
+    assert s2.json()["acknowledged"] is True
+
+
+def test_oncall_resolution_ignores_wrong_project_or_role(
+    client: TestClient, project: Project, session: Session, make_user
+) -> None:
+    """Bad/stale schedule data must never page the wrong tenant or role."""
+    resident_token, _ = _onboard(client, project, session, "+15559990050")
+    local_doctor = make_user(Role.DOCTOR, phone="+15559991250")
+
+    # A doctor who belongs to a different project.
+    other_project = Project(name="Other Residency")
+    session.add(other_project)
+    session.commit()
+    session.refresh(other_project)
+    foreign_doctor = User(
+        project_id=other_project.id,
+        phone="+15559991251",
+        role=Role.DOCTOR.value,
+        full_name="Foreign Doctor",
+    )
+    # A user in this project but with the wrong role.
+    nurse = make_user(Role.NURSE, phone="+15559991252")
+    session.add(foreign_doctor)
+    session.commit()
+
+    # Both schedule rows are invalid: cross-tenant user, and wrong-role user.
+    session.add(
+        OnCallSchedule(
+            project_id=project.id,
+            role=Role.DOCTOR.value,
+            user_id=foreign_doctor.id,
+            starts_at=utcnow() - timedelta(seconds=60),
+            ends_at=utcnow() + timedelta(hours=1),
+            is_backup=False,
+            contact_phone="+15550000000",
+        )
+    )
+    session.add(
+        OnCallSchedule(
+            project_id=project.id,
+            role=Role.DOCTOR.value,
+            user_id=nurse.id,
+            starts_at=utcnow() - timedelta(seconds=60),
+            ends_at=utcnow() + timedelta(hours=1),
+            is_backup=False,
+        )
+    )
+    session.commit()
+
+    created = client.post(
+        "/api/v1/emergency/alerts",
+        json={"symptom_codes": ["fall"]},
+        headers={
+            "Authorization": f"Bearer {resident_token}",
+            "Idempotency-Key": "bad-sched",
+        },
+    )
+    assert created.status_code == 200, created.text
+    # Falls back to the only eligible doctor in this project.
+    assert created.json()["assigned_doctor_id"] == str(local_doctor.id)
 
 
 def test_security_desk_not_paged_when_no_oncall(

@@ -61,6 +61,12 @@ class AlertOut(BaseModel):
     notification_attempts: list[NotificationAttemptOut]
 
 
+class CaseStatusOut(BaseModel):
+    case_id: uuid.UUID
+    status: str
+    acknowledged: bool
+
+
 class FallbackNumbersOut(BaseModel):
     case_id: uuid.UUID
     doctor: str | None
@@ -172,6 +178,23 @@ def run_backup_escalation(
         from_ip=client_ip(request),
     )
     return EscalationRunOut(escalated_case_ids=ids)
+
+
+@router.get(
+    "/emergency/alerts/{case_id}/status",
+    response_model=CaseStatusOut,
+)
+def emergency_case_status(
+    case_id: uuid.UUID,
+    user: User = Depends(resident_only),
+    session: Session = Depends(get_db),
+) -> dict:
+    """Resident-owned, PHI-free acknowledgment status. The resident polls this
+    to decide whether the 60s fallback sheet is needed (the doctor/nurse/ops
+    feed is not visible to residents)."""
+    return emergency_service.case_status_for_owner(
+        session, case_id=case_id, user=user
+    )
 
 
 @router.get(

@@ -62,4 +62,29 @@
   live Twilio/FCM gateway is wired on `PROVIDER_MODE=live` once the operator
   supplies keys (PLAN.md Slice 6 "Needs your keys") — verified end-to-end with
   real keys, not in CI.
+### Slice 6 review fixes (reliability contract)
+
+- **Durable outbox:** the planned notification attempts are written as
+  `queued` rows **in the same transaction as the case/event/audit/idempotency
+  rows**. Delivery happens after commit; a crash in between leaves a persisted
+  case *with* its queued attempts, and the idempotent retry re-runs
+  `_deliver_pending` to finish them. Delivery is idempotent (only `queued`
+  rows are sent), so create + replay never double-send.
+- **Resident-visible ack:** `GET /emergency/alerts/{id}/status` is a
+  resident-owned, PHI-free read so the mobile 60s countdown checks the real
+  acknowledgment instead of the staff-only `/active` feed (which would 403 a
+  resident and falsely show the fallback sheet).
+- **Retry-safe idempotency:** the mobile idempotency key is generated once per
+  tap, reused on every retry, and persisted (file-backed `PendingAlertStore`)
+  until the server confirms a case id — so a lost response or an app kill
+  while offline cannot create duplicate cases; `restore()` resumes with the
+  same key on next launch.
+- **On-call integrity:** resolution now verifies the scheduled user is still
+  active **and** in the scheduled project **with** the scheduled role; bad
+  schedule data can no longer page the wrong tenant/role.
+- **Escalation race:** the no-ack candidate cases are selected `FOR UPDATE`,
+  so two concurrent escalation runs serialize and the `backup_escalated`
+  marker cannot be double-inserted (SQLite ignores the lock; Postgres
+  enforces it).
+
 - Still Slice 7: case lifecycle (`acknowledged`→…→`closed`), vitals, notes.

@@ -35,10 +35,40 @@ class AlertResult {
 }
 
 /// Injectable seams so widget tests run without a network or dialer.
-typedef AlertSender = Future<AlertResult> Function();
+/// The same [idempotencyKey] is passed on every retry of one tap so a lost
+/// response can never create a duplicate emergency case.
+typedef AlertSender = Future<AlertResult> Function(String idempotencyKey);
 typedef AckChecker = Future<bool> Function(String caseId);
 typedef FallbackNumbersFetcher = Future<FallbackNumbers> Function(String caseId);
 typedef FallbackRecorder = Future<void> Function(String caseId, String channel);
+
+/// Durable store for the in-flight alert's idempotency key. Persisted on the
+/// tap and kept until the alert reaches the server (a case id is returned),
+/// so an app kill while offline does not lose the alert or let the resumed
+/// retry create a duplicate. A disk-backed implementation lives in
+/// `emergency_api.dart`; tests use the in-memory one.
+abstract class PendingAlertStore {
+  Future<String?> load();
+  Future<void> save(String idempotencyKey);
+  Future<void> clear();
+}
+
+class InMemoryPendingAlertStore implements PendingAlertStore {
+  String? _value;
+
+  @override
+  Future<String?> load() async => _value;
+
+  @override
+  Future<void> save(String idempotencyKey) async => _value = idempotencyKey;
+
+  @override
+  Future<void> clear() async => _value = null;
+}
+
+String _defaultKeyFactory() =>
+    'm-${DateTime.now().microsecondsSinceEpoch}-${_seq++}';
+int _seq = 0;
 
 /// Channel keys — must match backend `FallbackChannel` (shared enum source).
 class FallbackChannelKey {
@@ -61,14 +91,19 @@ class EmergencyController extends ChangeNotifier {
     required this.ackChecker,
     required this.numbersFetcher,
     required this.recorder,
+    PendingAlertStore? store,
+    String Function()? keyFactory,
     this.retryInterval = const Duration(seconds: 5),
     this.ackWindow = const Duration(seconds: 60),
-  });
+  })  : store = store ?? InMemoryPendingAlertStore(),
+        _keyFactory = keyFactory ?? _defaultKeyFactory;
 
   final AlertSender sender;
   final AckChecker ackChecker;
   final FallbackNumbersFetcher numbersFetcher;
   final FallbackRecorder recorder;
+  final PendingAlertStore store;
+  final String Function() _keyFactory;
   final Duration retryInterval;
   final Duration ackWindow;
 
@@ -76,27 +111,48 @@ class EmergencyController extends ChangeNotifier {
   bool fallbackVisible = false;
   String? caseId;
 
+  /// One key per tap, reused across every retry (P1-1: retry-safe).
+  String? idempotencyKey;
+
   Timer? _retryTimer;
   Timer? _ackTimer;
   bool _disposed = false;
 
   Future<void> trigger() async {
     if (phase == AlertPhase.sending || phase == AlertPhase.retrying) return;
+    idempotencyKey ??= _keyFactory();
+    // Persist intent BEFORE the first send so an app kill mid-offline can
+    // resume with the same key (no duplicate case on the server).
+    await store.save(idempotencyKey!);
+    _begin();
+  }
+
+  /// Resume an alert that was persisted but never confirmed (e.g. the app was
+  /// killed while offline). Reuses the stored key so the server dedupes.
+  Future<void> restore() async {
+    if (phase != AlertPhase.idle || idempotencyKey != null) return;
+    final saved = await store.load();
+    if (saved == null) return;
+    idempotencyKey = saved;
+    _begin();
+  }
+
+  void _begin() {
     phase = AlertPhase.sending;
     fallbackVisible = false;
     _safeNotify();
 
-    // The 60s countdown starts at the tap regardless of send success.
+    // The 60s countdown starts now regardless of send success.
     _ackTimer?.cancel();
     _ackTimer = Timer(ackWindow, _onAckWindowElapsed);
 
-    await _attemptSend();
+    _attemptSend();
   }
 
   Future<void> _attemptSend() async {
     AlertResult result;
     try {
-      result = await sender();
+      result = await sender(idempotencyKey!);
     } catch (_) {
       result = const AlertResult(ok: false);
     }
@@ -107,6 +163,8 @@ class EmergencyController extends ChangeNotifier {
       phase = AlertPhase.sent;
       _retryTimer?.cancel();
       _retryTimer = null;
+      // Confirmed on the server — the key is no longer needed for dedupe.
+      await store.clear();
     } else {
       phase = AlertPhase.retrying;
       _retryTimer ??= Timer.periodic(retryInterval, (_) => _attemptSend());
@@ -186,6 +244,8 @@ class _EmergencyScreenState extends State<EmergencyScreen> {
   void initState() {
     super.initState();
     widget.controller.addListener(_onChange);
+    // Resume an unconfirmed alert persisted before an app kill.
+    widget.controller.restore();
   }
 
   @override

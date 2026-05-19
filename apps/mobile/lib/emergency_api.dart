@@ -4,6 +4,49 @@ import 'dart:io';
 
 import 'emergency.dart';
 
+/// Disk-backed [PendingAlertStore]. Survives an app kill so an alert started
+/// while offline is resumed (with the same idempotency key) on next launch.
+/// Defaults under the OS temp dir so no `path_provider` dependency is needed;
+/// production can pass an app-private dir once that wiring lands.
+class FilePendingAlertStore implements PendingAlertStore {
+  FilePendingAlertStore({File? file})
+      : _file = file ??
+            File('${Directory.systemTemp.path}/med_emergency_pending.json');
+
+  final File _file;
+
+  @override
+  Future<String?> load() async {
+    try {
+      if (!await _file.exists()) return null;
+      final raw = jsonDecode(await _file.readAsString());
+      final key = (raw as Map)['idempotency_key'];
+      return key is String && key.isNotEmpty ? key : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
+  Future<void> save(String idempotencyKey) async {
+    try {
+      await _file
+          .writeAsString(jsonEncode({'idempotency_key': idempotencyKey}));
+    } catch (_) {
+      // Best-effort durability; a write failure must not block the alert.
+    }
+  }
+
+  @override
+  Future<void> clear() async {
+    try {
+      if (await _file.exists()) await _file.delete();
+    } catch (_) {
+      // Ignore — a stale file is re-validated against the server by key.
+    }
+  }
+}
+
 /// Default network wiring for the emergency flow (PLAN.md Slice 6).
 ///
 /// Uses `dart:io` only — no extra package dependency. The access token /
@@ -15,28 +58,23 @@ class EmergencyApi {
   EmergencyApi({
     this.baseUrl = 'http://localhost:8000',
     this.accessToken,
-    this.idempotencyKeyFactory = _uuidish,
   });
 
   final String baseUrl;
   final String? accessToken;
-  final String Function() idempotencyKeyFactory;
-
-  static String _uuidish() =>
-      'm-${DateTime.now().microsecondsSinceEpoch}';
 
   Map<String, String> get _headers => {
         'content-type': 'application/json',
         if (accessToken != null) 'authorization': 'Bearer $accessToken',
       };
 
-  Future<AlertResult> sendAlert() async {
+  Future<AlertResult> sendAlert(String idempotencyKey) async {
     final client = HttpClient();
     try {
       final req = await client
           .postUrl(Uri.parse('$baseUrl/api/v1/emergency/alerts'));
       _headers.forEach(req.headers.set);
-      req.headers.set('idempotency-key', idempotencyKeyFactory());
+      req.headers.set('idempotency-key', idempotencyKey);
       req.add(utf8.encode(jsonEncode({'symptom_codes': <String>[]})));
       final resp = await req.close();
       if (resp.statusCode != 200) return const AlertResult(ok: false);
@@ -50,19 +88,18 @@ class EmergencyApi {
   }
 
   Future<bool> isAcknowledged(String caseId) async {
+    // Resident-owned, PHI-free status read. The /active feed is staff-only
+    // (a resident token would 403), so the app must use this endpoint.
     final client = HttpClient();
     try {
       final req = await client.getUrl(
-        Uri.parse('$baseUrl/api/v1/emergency/alerts/active'),
+        Uri.parse('$baseUrl/api/v1/emergency/alerts/$caseId/status'),
       );
       _headers.forEach(req.headers.set);
       final resp = await req.close();
       if (resp.statusCode != 200) return false;
-      final list = jsonDecode(await resp.transform(utf8.decoder).join());
-      for (final a in list as List) {
-        if (a['id'] == caseId) return a['status'] != 'alerted';
-      }
-      return false;
+      final j = jsonDecode(await resp.transform(utf8.decoder).join());
+      return (j as Map)['acknowledged'] == true;
     } catch (_) {
       return false;
     } finally {
@@ -115,5 +152,6 @@ class EmergencyApi {
         ackChecker: isAcknowledged,
         numbersFetcher: fallbackNumbers,
         recorder: recordFallback,
+        store: FilePendingAlertStore(),
       );
 }

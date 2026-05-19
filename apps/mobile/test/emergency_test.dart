@@ -8,6 +8,8 @@ EmergencyController _controller({
   AckChecker? ack,
   FallbackNumbersFetcher? numbers,
   FallbackRecorder? recorder,
+  PendingAlertStore? store,
+  String Function()? keyFactory,
   Duration retry = const Duration(milliseconds: 50),
   Duration ackWindow = const Duration(seconds: 30),
 }) {
@@ -16,6 +18,8 @@ EmergencyController _controller({
     ackChecker: ack ?? (_) async => false,
     numbersFetcher: numbers ?? (_) async => FallbackNumbers.offline,
     recorder: recorder ?? (_, __) async {},
+    store: store,
+    keyFactory: keyFactory ?? () => 'key-fixed',
     retryInterval: retry,
     ackWindow: ackWindow,
   );
@@ -36,7 +40,7 @@ Future<void> _pump(WidgetTester tester, EmergencyController c,
 void main() {
   testWidgets('One tap sends the alert and shows "Alert sent"', (tester) async {
     var calls = 0;
-    final c = _controller(sender: () async {
+    final c = _controller(sender: (_) async {
       calls++;
       return const AlertResult(ok: true, caseId: 'case-1');
     });
@@ -55,7 +59,7 @@ void main() {
       (tester) async {
     var calls = 0;
     final c = _controller(
-      sender: () async {
+      sender: (_) async {
         calls++;
         return const AlertResult(ok: false);
       },
@@ -74,10 +78,60 @@ void main() {
     c.dispose();
   });
 
+  testWidgets('The same idempotency key is reused on every retry',
+      (tester) async {
+    final keys = <String>[];
+    var calls = 0;
+    final c = _controller(
+      sender: (key) async {
+        keys.add(key);
+        calls++;
+        return AlertResult(ok: calls >= 3, caseId: calls >= 3 ? 'case-k' : null);
+      },
+      keyFactory: () => 'tap-key-1',
+    );
+
+    await _pump(tester, c);
+    await tester.tap(find.widgetWithText(FilledButton, 'I Need Medical Help'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.pump();
+
+    expect(calls, greaterThanOrEqualTo(3));
+    expect(keys.toSet(), {'tap-key-1'});
+    c.dispose();
+  });
+
+  testWidgets('Restore resumes a persisted alert with the same key',
+      (tester) async {
+    final store = InMemoryPendingAlertStore();
+    await store.save('persisted-key');
+    final keys = <String>[];
+    final c = _controller(
+      sender: (key) async {
+        keys.add(key);
+        return const AlertResult(ok: true, caseId: 'case-r');
+      },
+      store: store,
+      keyFactory: () => 'should-not-be-used',
+    );
+
+    await _pump(tester, c); // initState() calls restore()
+    await tester.pump();
+    await tester.pump();
+
+    expect(keys, ['persisted-key']);
+    expect(await store.load(), isNull); // cleared once confirmed
+    c.dispose();
+  });
+
   testWidgets('No ack within the window surfaces the fallback sheet',
       (tester) async {
     final c = _controller(
-      sender: () async => const AlertResult(ok: true, caseId: 'case-9'),
+      sender: (_) async => const AlertResult(ok: true, caseId: 'case-9'),
       ack: (_) async => false,
       numbers: (_) async => const FallbackNumbers(
         emergency108: '108',
@@ -108,7 +162,7 @@ void main() {
     Uri? launched;
     final recorded = <String>[];
     final c = _controller(
-      sender: () async => const AlertResult(ok: true, caseId: 'case-7'),
+      sender: (_) async => const AlertResult(ok: true, caseId: 'case-7'),
       ack: (_) async => false,
       numbers: (_) async => const FallbackNumbers(
         emergency108: '108',
@@ -141,7 +195,7 @@ void main() {
   testWidgets('Security desk / family buttons hidden when not resolved',
       (tester) async {
     final c = _controller(
-      sender: () async => const AlertResult(ok: true, caseId: 'case-3'),
+      sender: (_) async => const AlertResult(ok: true, caseId: 'case-3'),
       ack: (_) async => false,
       numbers: (_) async =>
           const FallbackNumbers(emergency108: '108', emergency112: '112'),

@@ -31,9 +31,19 @@ class OnCallResolution:
     source: str
 
 
-def _active_user(session: Session, user_id: uuid.UUID) -> User | None:
+def _eligible_user(
+    session: Session,
+    user_id: uuid.UUID,
+    *,
+    project_id: uuid.UUID,
+    role: Role,
+) -> User | None:
+    """Active **and** still in the scheduled project with the scheduled role.
+    Bad/stale schedule data must never page the wrong tenant or role."""
     user = session.get(User, user_id)
     if user is None or not user.is_active or user.deleted_at is not None:
+        return None
+    if user.project_id != project_id or user.role != role.value:
         return None
     return user
 
@@ -64,7 +74,9 @@ def resolve_on_call(
         .order_by(OnCallSchedule.starts_at.desc())  # type: ignore[attr-defined]
     ).all()
     for row in rows:
-        user = _active_user(session, row.user_id)
+        user = _eligible_user(
+            session, row.user_id, project_id=project_id, role=role
+        )
         if user is not None:
             return OnCallResolution(
                 user=user,

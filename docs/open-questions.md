@@ -25,6 +25,19 @@
 - **Surfaced in:** Slice 6 / `app/services/emergency_service.py`,
   `app/api/emergency.py`
 
+### `[NEEDS_OPS_DECISION]` Mobile pending-alert store location
+- **Question:** Where should the durable pending-alert file live in
+  production — an app-private directory (via `path_provider`) rather than the
+  OS temp dir?
+- **Why it matters:** The Slice 6 review made the offline alert durable
+  (`FilePendingAlertStore`, idempotency key persisted until the server
+  confirms, resumed on launch). The default path is `Directory.systemTemp` to
+  avoid a `path_provider` dependency now; the OS may evict temp files.
+- **Technical default applied:** file-backed store under systemTemp, injected
+  into the controller; production swaps in an app-private dir once the mobile
+  storage dependency lands. Behaviour and tests are unchanged by the path.
+- **Surfaced in:** Slice 6 review / `apps/mobile/lib/emergency_api.dart`
+
 ### `[NEEDS_OPS_DECISION]` Mobile fallback-tap offline durability
 - **Question:** When a fallback button is tapped with no connectivity, the
   `case_events` record write is best-effort and currently dropped on failure.

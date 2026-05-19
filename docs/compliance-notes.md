@@ -141,6 +141,21 @@
   covered against the stub. No diagnosis language in any channel body, audit,
   or log.
 
+### Slice 6 review fixes
+
+- Notification delivery is now durable: queued `notification_attempts` commit
+  atomically with the case, so an emergency can never be persisted with no
+  notification record, and an interrupted delivery resumes on the idempotent
+  retry. Still no body/PHI/symptoms in those rows.
+- The resident acknowledgment read (`/emergency/alerts/{id}/status`) is
+  owner-scoped and PHI-free (status + a boolean only); a non-owner gets 404
+  with no existence leak, matching the Slice 3/4 tenant-isolation pattern.
+- The mobile idempotency key is persisted only as an opaque client token (no
+  PII) on the device, cleared once the server confirms the case.
+- On-call resolution enforces tenant + role on the scheduled user, so a
+  misconfigured schedule cannot route an alert (or the security-desk minimal
+  payload) to the wrong project or role.
+
 ## Open questions — `[NEEDS_LEGAL_REVIEW]`
 
 1. `[NEEDS_LEGAL_REVIEW]` DPDP cross-border data: acceptable AWS S3 region for

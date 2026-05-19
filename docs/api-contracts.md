@@ -40,6 +40,7 @@
 | POST | `/api/v1/devices/push-token` | 5 | doctor/nurse/ops registers a push token for alert fan-out |
 | POST | `/api/v1/emergency/alerts` | 5/6 | resident idempotent alert; records case + 3-channel fan-out (FCM+SMS+voice) to the on-call doctor, opt-in security-desk minimal payload |
 | GET | `/api/v1/emergency/alerts/active` | 5 | doctor/nurse/ops active alert feed; PHI-blocked and tenant-scoped |
+| GET | `/api/v1/emergency/alerts/{case_id}/status` | 6 | resident (owner) PHI-free `{status, acknowledged}`; drives the mobile fallback countdown (the staff feed is not resident-visible) |
 | POST | `/api/v1/emergency/escalations/run` | 6 | ops-only, tenant-scoped; pages the backup doctor for alerts with no ack within the window. Idempotent; manual entry point until scheduler infra lands |
 | GET | `/api/v1/emergency/alerts/{case_id}/fallback-numbers` | 6 | resident (owner) fallback numbers; 108/112 are constants, the rest resolved from project / on-call / contacts; audited |
 | POST | `/api/v1/emergency/alerts/{case_id}/fallback` | 6 | resident (owner) records a fallback-sheet tap (`channel`) to `case_events`; audited. Does not cancel the retrying alert |
