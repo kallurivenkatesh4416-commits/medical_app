@@ -6,8 +6,9 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
 from app.enums import Role
-from app.models.auth import OtpCode
+from app.models.auth import OtpCode, RefreshToken
 from app.models.base import utcnow
+from app.models.user import User
 
 
 def _bearer(token: str) -> dict[str, str]:
@@ -104,6 +105,38 @@ def test_refresh_rotation_and_reuse_detection(
         "/api/v1/auth/refresh", json={"refresh_token": new_refresh}
     )
     assert after.status_code == 401
+
+
+def test_rotation_is_consistent_and_replay_kills_new_token(
+    client: TestClient, make_user, login, session: Session
+) -> None:
+    user = make_user(Role.DOCTOR, phone="+15551110007")
+    tokens = login(user.phone)
+    refresh_a = tokens["refresh_token"]
+
+    def _user_tokens() -> list[RefreshToken]:
+        uid = session.exec(
+            select(User.id).where(User.phone == "+15551110007")
+        ).first()
+        session.expire_all()
+        return list(
+            session.exec(select(RefreshToken).where(RefreshToken.user_id == uid)).all()
+        )
+
+    r = client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_a})
+    assert r.status_code == 200
+
+    # Old revoked + new present together: never "old revoked, new missing".
+    rows = _user_tokens()
+    assert len(rows) == 2
+    assert sum(1 for t in rows if t.revoked_at is None) == 1
+
+    # Replaying the old token must revoke the whole family — including the
+    # winner's freshly issued token.
+    replay = client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_a})
+    assert replay.status_code == 401
+    assert replay.json()["error"]["code"] == "refresh_reuse_detected"
+    assert all(t.revoked_at is not None for t in _user_tokens())
 
 
 def test_logout_revokes_refresh(client: TestClient, make_user, login) -> None:

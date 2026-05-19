@@ -8,7 +8,6 @@ users to exist (seeded). Refresh tokens are opaque, stored hashed, single-use
 import uuid
 from datetime import timedelta
 
-from sqlalchemy import update
 from sqlmodel import Session, select
 
 from app.config import get_settings
@@ -71,11 +70,10 @@ def request_otp(session: Session, *, phone: str, from_ip: str | None) -> str:
     return code
 
 
-def _issue_tokens(session: Session, user: User) -> tuple[str, str]:
+def _stage_refresh(session: Session, user: User) -> str:
+    """Add (but do NOT commit) a new refresh token; return the raw value.
+    Caller controls the transaction boundary."""
     settings = get_settings()
-    access = create_access_token(
-        user_id=user.id, role=user.role, project_id=user.project_id
-    )
     raw_refresh = new_opaque_token()
     session.add(
         RefreshToken(
@@ -84,6 +82,14 @@ def _issue_tokens(session: Session, user: User) -> tuple[str, str]:
             expires_at=_now() + timedelta(seconds=settings.jwt_refresh_ttl_seconds),
         )
     )
+    return raw_refresh
+
+
+def _issue_tokens(session: Session, user: User) -> tuple[str, str]:
+    access = create_access_token(
+        user_id=user.id, role=user.role, project_id=user.project_id
+    )
+    raw_refresh = _stage_refresh(session, user)
     session.commit()
     return access, raw_refresh
 
@@ -183,16 +189,24 @@ def _revoke_all_user_refresh(session: Session, user_id: uuid.UUID) -> None:
 def rotate_refresh(
     session: Session, *, raw_refresh: str, from_ip: str | None
 ) -> tuple[str, str]:
+    # Serialize concurrent refreshes on the parent token row. On Postgres this
+    # is a real row lock (FOR UPDATE); SQLite ignores it (single writer anyway).
+    # A losing/replaying request blocks here until the winner commits, so it
+    # then observes revoked_at set AND the winner's freshly-inserted token —
+    # which it revokes as reuse.
     token = session.exec(
-        select(RefreshToken).where(RefreshToken.token_hash == hash_secret(raw_refresh))
+        select(RefreshToken)
+        .where(RefreshToken.token_hash == hash_secret(raw_refresh))
+        .with_for_update()
     ).first()
 
     if token is None:
         raise AuthError(401, "invalid_refresh", "Invalid refresh token.")
 
-    def _flag_reuse() -> None:
-        # A revoked/already-rotated token presented again = theft/replay or a
-        # concurrent double-spend. Kill the whole family.
+    if token.revoked_at is not None:
+        # Replay / double-spend: revoke the whole family, including any token a
+        # concurrent winner just issued (now visible — we were serialized after
+        # it via the row lock).
         _revoke_all_user_refresh(session, token.user_id)
         record_audit(
             session,
@@ -201,9 +215,6 @@ def rotate_refresh(
             from_ip=from_ip,
             purpose="auth.refresh",
         )
-
-    if token.revoked_at is not None:
-        _flag_reuse()
         raise AuthError(401, "refresh_reuse_detected", "Session revoked. Please log in again.")
 
     if token.expires_at < _now():
@@ -213,20 +224,17 @@ def rotate_refresh(
     if user is None or not user.is_active or user.deleted_at is not None:
         raise AuthError(403, "account_inactive", "Account is not active.")
 
-    # Atomically claim the token: exactly one concurrent request can flip
-    # revoked_at from NULL. The loser gets rowcount 0 and is treated as reuse,
-    # preserving the single-use guarantee without a DB-specific row lock.
-    result = session.execute(
-        update(RefreshToken)
-        .where(RefreshToken.id == token.id, RefreshToken.revoked_at.is_(None))
-        .values(revoked_at=_now())
+    # One transaction: revoke the old token AND insert its replacement together
+    # so a concurrent replay can never see "old revoked, new missing", and the
+    # replacement is committed before any loser is unblocked.
+    token.revoked_at = _now()
+    session.add(token)
+    access = create_access_token(
+        user_id=user.id, role=user.role, project_id=user.project_id
     )
+    new_refresh = _stage_refresh(session, user)
     session.commit()
-    if result.rowcount != 1:
-        _flag_reuse()
-        raise AuthError(401, "refresh_reuse_detected", "Session revoked. Please log in again.")
 
-    access, new_refresh = _issue_tokens(session, user)
     record_audit(
         session,
         action=AuditAction.TOKEN_REFRESHED,
