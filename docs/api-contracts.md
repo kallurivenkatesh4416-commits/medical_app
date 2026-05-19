@@ -19,5 +19,13 @@
 |---|---|---|---|
 | GET | `/healthz` | 1 | liveness |
 | GET | `/readyz` | 1 | readiness (DB reachable) |
+| POST | `/api/v1/auth/otp/request` | 2 | sends OTP (stub SMS in dev); `dev_otp` only when `APP_ENV=local` |
+| POST | `/api/v1/auth/otp/verify` | 2 | verifies OTP → access + refresh tokens |
+| POST | `/api/v1/auth/refresh` | 2 | rotates refresh (single-use, reuse-detected) |
+| POST | `/api/v1/auth/logout` | 2 | revokes the refresh token (204) |
+| GET | `/api/v1/auth/me` | 2 | current user (Bearer access token) |
 
-_Status: skeleton (Slice 1). Endpoints added per slice._
+Auth: `Authorization: Bearer <access>`. Access tokens are short-lived JWTs;
+refresh tokens are opaque, stored hashed, rotated on every use.
+
+_Endpoints added per slice._

@@ -12,6 +12,7 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "pydantic-settings>=2.4",
     "structlog>=24.4",
+    "pyjwt>=2.9",
 ]
 
 [project.optional-dependencies]
@@ -36,6 +37,14 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "W"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection pattern intentionally calls these in defaults.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Security",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

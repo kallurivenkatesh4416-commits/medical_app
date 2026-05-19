@@ -41,6 +41,17 @@ async def http_exception_handler(_: Request, exc: StarletteHTTPException) -> JSO
     )
 
 
+async def auth_exception_handler(_: Request, exc: Exception) -> JSONResponse:
+    # app.services.auth_service.AuthError -> standard envelope.
+    from app.services.auth_service import AuthError
+
+    assert isinstance(exc, AuthError)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=error_body(code=exc.code, message=exc.message),
+    )
+
+
 async def unhandled_exception_handler(_: Request, __: Exception) -> JSONResponse:
     # Never leak the exception to the client; details stay in server logs.
     return JSONResponse(

@@ -20,4 +20,14 @@
 - `projects.enable_security_desk_alerts` (bool, default false).
 - `on_call_schedules`, `notification_attempts`, `case_events` added (see PLAN.md).
 
-_Status: skeleton (Slice 1). Schema realised via Alembic from Slice 2._
+## Realised so far
+
+- **Slice 2** (migration `0001_core_auth`): `projects`, `users`, `otp_codes`,
+  `refresh_tokens`, `audit_log`. Secrets (OTP codes, refresh tokens) stored only
+  as keyed HMAC-SHA256 hashes. `users.deleted_at` is the soft-delete column.
+  `audit_log` has no `updated_at` and is append-only: a SQLAlchemy event blocks
+  UPDATE/DELETE (covers SQLite/tests) and a Postgres `RULE ... DO INSTEAD
+  NOTHING` blocks it at the DB in prod. `alembic check` verifies model↔migration
+  parity in CI scope.
+
+_Schema continues to grow per slice._

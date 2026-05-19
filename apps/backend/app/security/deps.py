@@ -1,0 +1,68 @@
+"""FastAPI dependencies: DB session, client IP, current user, RBAC guards."""
+
+import uuid
+from collections.abc import Iterator
+
+from fastapi import Depends, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlmodel import Session
+
+from app.db import engine
+from app.enums import NON_PHI_ROLES, Role
+from app.models.user import User
+from app.security.jwt import TokenError, decode_access_token
+
+_bearer = HTTPBearer(auto_error=False)
+
+
+def get_db() -> Iterator[Session]:
+    with Session(engine) as session:
+        yield session
+
+
+def client_ip(request: Request) -> str | None:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else None
+
+
+def get_current_user(
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    session: Session = Depends(get_db),
+) -> User:
+    if creds is None or not creds.credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        payload = decode_access_token(creds.credentials)
+    except TokenError as exc:
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
+
+    try:
+        user_id = uuid.UUID(str(payload["sub"]))
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
+
+    user = session.get(User, user_id)
+    if user is None or not user.is_active or user.deleted_at is not None:
+        raise HTTPException(status_code=401, detail="Inactive or unknown account")
+    return user
+
+
+def require_roles(*allowed: Role):
+    allowed_values = {r.value for r in allowed}
+
+    def _dep(user: User = Depends(get_current_user)) -> User:
+        if user.role not in allowed_values:
+            raise HTTPException(status_code=403, detail="Insufficient role")
+        return user
+
+    return _dep
+
+
+def forbid_phi_roles(user: User = Depends(get_current_user)) -> User:
+    """Guard for any endpoint that exposes PHI. builder_admin and
+    security_desk are blocked unconditionally (brief §2.3 / §13)."""
+    if user.role in {r.value for r in NON_PHI_ROLES}:
+        raise HTTPException(status_code=403, detail="This role cannot access patient data")
+    return user

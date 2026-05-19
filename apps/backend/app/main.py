@@ -1,7 +1,7 @@
 """FastAPI application factory.
 
 Slice 1: app bootstrap, structured logging, error envelope, health checks.
-Auth/RBAC, audit log, and feature routers are added from Slice 2.
+Slice 2: OTP auth, JWT, RBAC, append-only audit log.
 """
 
 from fastapi import FastAPI
@@ -9,14 +9,17 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import __version__
+from app.api.auth import router as auth_router
 from app.api.health import router as health_router
 from app.config import get_settings
 from app.errors import (
+    auth_exception_handler,
     http_exception_handler,
     unhandled_exception_handler,
     validation_exception_handler,
 )
 from app.logging import configure_logging, get_logger
+from app.services.auth_service import AuthError
 
 
 def create_app() -> FastAPI:
@@ -36,9 +39,11 @@ def create_app() -> FastAPI:
 
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
+    app.add_exception_handler(AuthError, auth_exception_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
 
     app.include_router(health_router)
+    app.include_router(auth_router)
 
     log.info("app_started", env=settings.app_env, provider_mode=settings.provider_mode)
     return app

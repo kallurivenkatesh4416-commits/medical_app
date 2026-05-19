@@ -23,6 +23,17 @@ class Settings(BaseSettings):
     # Swappable provider gateways (see PLAN.md "Provider abstraction").
     provider_mode: str = "stub"
 
+    # --- Auth / JWT (short-lived access + refresh; RBAC) ---
+    jwt_secret: str = "change-me-generate-a-long-random-string"
+    jwt_algorithm: str = "HS256"
+    jwt_access_ttl_seconds: int = 900
+    jwt_refresh_ttl_seconds: int = 1_209_600
+
+    # OTP login (stub SMS in dev). Codes are short-lived and hashed at rest.
+    otp_ttl_seconds: int = 300
+    otp_length: int = 6
+    otp_max_attempts: int = 5
+
 
 @lru_cache
 def get_settings() -> Settings:

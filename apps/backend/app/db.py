@@ -1,27 +1,38 @@
-"""Database engine + session (SQLModel / SQLAlchemy 2.x).
-
-Models and migrations land from Slice 2; this module exists so health checks can
-verify DB connectivity and Alembic can target the metadata.
-"""
+"""Database engine + session (SQLModel / SQLAlchemy 2.x)."""
 
 from collections.abc import Iterator
 
 from sqlalchemy import text
+from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.config import get_settings
 
 _settings = get_settings()
+_url = _settings.database_url
 
-_connect_args = (
-    {"check_same_thread": False}
-    if _settings.database_url.startswith("sqlite")
-    else {}
-)
 
-engine = create_engine(_settings.database_url, connect_args=_connect_args, pool_pre_ping=True)
+def _make_engine():
+    if _url.startswith("sqlite"):
+        connect_args = {"check_same_thread": False}
+        # In-memory SQLite needs a single shared connection or every session
+        # gets its own empty database (breaks tests + TestClient threads).
+        is_memory = _url in ("sqlite://", "sqlite:///:memory:")
+        if is_memory:
+            return create_engine(
+                _url, connect_args=connect_args, poolclass=StaticPool
+            )
+        return create_engine(_url, connect_args=connect_args)
+    return create_engine(_url, pool_pre_ping=True)
 
-# Shared metadata target for Alembic autogenerate (populated by models in Slice 2).
+
+engine = _make_engine()
+
+# Importing the models registers them on SQLModel.metadata (used by Alembic and
+# by create_all in tests). Imported here so any DB consumer sees the tables.
+from app import models  # noqa: E402,F401
+
+# Shared metadata target for Alembic autogenerate.
 metadata = SQLModel.metadata
 
 

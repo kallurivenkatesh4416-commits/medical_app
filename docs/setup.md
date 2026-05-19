@@ -32,9 +32,18 @@ python -m venv .venv
 . .venv/Scripts/activate        # Windows PowerShell: .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
 alembic upgrade head
+python -m app.seed          # demo project + one user per role
 uvicorn app.main:app --reload
 pytest
 ```
+
+### Logging in (dev)
+
+With `APP_ENV=local`, `POST /api/v1/auth/otp/request` returns the code in a
+`dev_otp` field so you can complete `POST /api/v1/auth/otp/verify` without a
+real SMS provider. Seeded demo phones are `+15550001`…`+15550009` (one per
+role; exact numbers in `app/seed.py` → `SEED_PHONES`). `dev_otp` is never
+exposed outside `local`.
 
 ## Required env vars
 

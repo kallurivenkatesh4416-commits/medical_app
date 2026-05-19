@@ -20,6 +20,19 @@
 - **Telemedicine:** consultation notes capture doctor name, registration number,
   consultation timestamp, advice given, patient consent flag (schema from day one).
 
+## Slice 2 implementation notes (auth)
+
+- OTP codes and refresh tokens are never stored or logged in the clear — only
+  keyed HMAC-SHA256 hashes at rest; the stub SMS gateway logs a masked recipient
+  only, never the code.
+- `audit_log` stores a non-reversible phone fingerprint (`phone_fp`), never the
+  raw phone number, for pre-auth events.
+- `dev_otp` is returned by `POST /auth/otp/request` **only** when
+  `APP_ENV=local` (dev/CI convenience). It is suppressed in every other
+  environment and an automated test asserts this.
+- Append-only audit enforced two ways: app-level SQLAlchemy guard + Postgres
+  rule (migration `0001`). `[NEEDS_LEGAL_REVIEW]` item #3 (retention) still open.
+
 ## Open questions — `[NEEDS_LEGAL_REVIEW]`
 
 1. `[NEEDS_LEGAL_REVIEW]` DPDP cross-border data: acceptable AWS S3 region for
