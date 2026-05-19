@@ -31,6 +31,12 @@
 | GET | `/api/v1/me/consents` | 3 | resident's consents |
 | PATCH | `/api/v1/me/consents/{consent_type}` | 3 | grant/revoke; `data_storage`=false closes account |
 | GET | `/api/v1/residents/{id}/profile` | 3 | staff view (doctor/nurse/ops; PHI-role-blocked; consent-gated; audited) |
+| POST | `/api/v1/me/records` | 4 | resident upload (multipart PDF/JPEG/PNG, tags, `Idempotency-Key`; audited) |
+| GET | `/api/v1/me/records` | 4 | resident list of own medical records (audited) |
+| GET | `/api/v1/me/records/{id}/link` | 4 | resident signed download link; TTL hard-capped at 900s |
+| GET | `/api/v1/residents/{resident_id}/records` | 4 | staff list (doctor/nurse/ops; PHI-blocked, tenant-isolated, consent-gated, audited) |
+| GET | `/api/v1/residents/{resident_id}/records/{id}/link` | 4 | staff signed download link; same guards as staff list |
+| GET | `/api/v1/records/download/{token}` | 4 | local stub signed-link download; invalid/tampered/expired tokens return 401 |
 
 Auth: `Authorization: Bearer <access>`. Access tokens are short-lived JWTs;
 refresh tokens are opaque, stored hashed, rotated on every use.

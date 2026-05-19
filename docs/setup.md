@@ -23,6 +23,10 @@ Then:
 - Backend health: `GET http://localhost:8000/healthz` and `/readyz`
 - API docs: `http://localhost:8000/docs`
 - Mailhog UI: `http://localhost:8025`
+- In default `PROVIDER_MODE=stub`, medical-record files are stored as encrypted
+  local blobs under `LOCAL_STORAGE_DIR`; signed links are served by the backend
+  and capped at 15 minutes. `PROVIDER_MODE=live` uses S3/LocalStack via
+  `S3_ENDPOINT_URL`.
 
 ## Backend dev (without Docker)
 
@@ -50,4 +54,5 @@ real SMS provider. Seeded demo phones are `+15550000001`…`+15550000009`
 See `.env.example` (annotated). Provider keys (Twilio/FCM/AWS) are only needed from
 the slice that uses them; default `PROVIDER_MODE=stub` needs no external accounts.
 
-_Status: Slice 1 covers backend + infra. Dashboard/mobile steps added per slice._
+_Status: Slices 1-4 cover backend foundation, auth/RBAC/audit, onboarding/consent/profile,
+and medical-record upload/list/link. Dashboard/mobile steps added per slice._

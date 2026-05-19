@@ -27,6 +27,15 @@ class TokenType(StrEnum):
     REFRESH = "refresh"
     # Short-lived grant proving phone ownership during self-registration.
     REGISTRATION = "registration"
+    # Capability token embedded in a stub signed download URL (<=15 min).
+    RECORD_URL = "record_url"
+
+
+class MedicalRecordType(StrEnum):
+    PRESCRIPTION = "prescription"
+    LAB = "lab"
+    SCAN = "scan"
+    DISCHARGE = "discharge"
 
 
 class ConsentType(StrEnum):
@@ -69,3 +78,6 @@ class AuditAction(StrEnum):
     CONSENT_REVOKED = "consent_revoked"
     PATIENT_PROFILE_READ = "patient_profile_read"
     ACCOUNT_CLOSURE_INITIATED = "account_closure_initiated"
+    RECORD_UPLOADED = "record_uploaded"
+    RECORD_LIST = "record_list"
+    RECORD_LINK_ISSUED = "record_link_issued"

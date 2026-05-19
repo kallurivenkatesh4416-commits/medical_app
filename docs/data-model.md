@@ -38,9 +38,16 @@
 
 - **Slice 3 review** (migration `0003_idempotency`): `idempotency_keys`
   (unique `endpoint`+`key`; stores `owner_fp` + `request_fp` + the created
-  `user_id` — never tokens). Backs the brief §10 idempotency convention;
+  `user_id` or `resource_id` — never tokens). Backs the brief §10 idempotency convention;
   onboarding records its key in the same transaction as the account so
   create + key commit atomically. Replay is owner+request bound (see
   compliance-notes).
+
+- **Slice 4** (migration `0004_medical_records`): `medical_records` stores
+  resident/project scope, encrypted object `storage_key`, sanitized filename,
+  content type, record type (`prescription`/`lab`/`scan`/`discharge`), optional
+  record date/source/tags, size, uploader, timestamps, and `deleted_at`.
+  `idempotency_keys.resource_id` points at the created record for exact upload
+  replay. Object bytes live outside the DB in the `StorageGateway`.
 
 _Schema continues to grow per slice._

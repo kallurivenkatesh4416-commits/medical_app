@@ -71,6 +71,24 @@
   `data_storage` is revoked, no path (login, onboarding, idempotent replay)
   can mint fresh credentials for the closed account.
 
+## Slice 4 implementation notes (medical records)
+
+- Medical-record uploads accept PDF/JPEG/PNG only, enforce the configured size
+  limit, sanitize download filenames, and store bytes through `StorageGateway`.
+- Stub storage encrypts local blobs with a Fernet key derived from the app
+  secret. Live storage writes S3 objects with SSE-KMS when configured, falling
+  back to SSE-S3 (`AES256`) otherwise.
+- Signed download links are hard-capped at 900 seconds regardless of
+  `S3_SIGNED_URL_TTL_SECONDS`. The local stub uses JWT capability links;
+  live mode uses native S3 presigned GET URLs.
+- Resident upload/list/link and staff list/link are audited. Staff access is
+  restricted to doctor/nurse/ops, PHI-blocked for builder/security roles,
+  tenant-isolated with 404 on cross-project residents, and gated by
+  `emergency_share_with_doctor`.
+- Upload idempotency is exact-match: same verified resident + same file hash +
+  same metadata returns the original record; owner/body mismatch returns
+  `idempotency_key_conflict`.
+
 ## Open questions — `[NEEDS_LEGAL_REVIEW]`
 
 1. `[NEEDS_LEGAL_REVIEW]` DPDP cross-border data: acceptable AWS S3 region for

@@ -30,5 +30,8 @@ class IdempotencyKey(UUIDPKMixin, table=True):
     # Fingerprint of the original request body; a same-key replay with a
     # different payload is a conflict, not a replay.
     request_fp: str = Field()
+    # Reference to the created resource. user_id for onboarding; resource_id
+    # for other resource-creating writes (e.g. medical records).
     user_id: uuid.UUID | None = Field(default=None)
+    resource_id: uuid.UUID | None = Field(default=None)
     created_at: datetime = Field(default_factory=utcnow, nullable=False)

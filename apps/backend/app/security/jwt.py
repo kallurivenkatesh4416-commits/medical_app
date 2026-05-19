@@ -68,3 +68,31 @@ def decode_registration_token(token: str) -> str:
     if not phone:
         raise TokenError("missing subject")
     return phone
+
+
+def create_record_url_token(*, storage_key: str, download_name: str, ttl: int) -> str:
+    settings = get_settings()
+    now = datetime.now(tz=UTC)
+    payload: dict[str, Any] = {
+        "sub": storage_key,
+        "dn": download_name,
+        "type": TokenType.RECORD_URL.value,
+        "iat": now,
+        "exp": now + timedelta(seconds=ttl),
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+def decode_record_url_token(token: str) -> tuple[str, str]:
+    """Return (storage_key, download_name); raise TokenError if invalid/expired."""
+    settings = get_settings()
+    try:
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+    except jwt.PyJWTError as exc:
+        raise TokenError(str(exc)) from exc
+    if payload.get("type") != TokenType.RECORD_URL.value:
+        raise TokenError("not a record url token")
+    key = payload.get("sub")
+    if not key:
+        raise TokenError("missing subject")
+    return key, payload.get("dn") or "record"

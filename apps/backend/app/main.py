@@ -13,6 +13,7 @@ from app.api.auth import router as auth_router
 from app.api.health import router as health_router
 from app.api.onboarding import router as onboarding_router
 from app.api.profile import router as profile_router
+from app.api.records import router as records_router
 from app.config import get_settings
 from app.errors import (
     auth_exception_handler,
@@ -48,6 +49,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(onboarding_router)
     app.include_router(profile_router)
+    app.include_router(records_router)
 
     log.info("app_started", env=settings.app_env, provider_mode=settings.provider_mode)
     return app

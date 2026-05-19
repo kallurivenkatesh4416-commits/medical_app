@@ -43,6 +43,19 @@ class Settings(BaseSettings):
     # cannot spoof the audited source IP.
     trust_forwarded_for: bool = False
 
+    # --- Medical records storage (brief §2.3) ---
+    # Requested signed-URL TTL; the gateway hard-caps it at 900s (15 min).
+    s3_signed_url_ttl_seconds: int = 900
+    s3_bucket: str = "med-records-local"
+    s3_region: str = "ap-south-1"
+    s3_endpoint_url: str | None = None  # set for LocalStack; unset for real AWS
+    s3_kms_key_id: str | None = None  # SSE-KMS in prod; SSE-S3 fallback
+    # Stub gateway writes encrypted blobs here (dev/CI only).
+    local_storage_dir: str = "./var/records"
+    # Base used to build stub signed download links.
+    public_base_url: str = "http://localhost:8000"
+    max_upload_bytes: int = 15_728_640  # 15 MiB
+
 
 @lru_cache
 def get_settings() -> Settings:

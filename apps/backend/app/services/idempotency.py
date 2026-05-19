@@ -67,16 +67,22 @@ def stage(
     *,
     endpoint: str,
     ctx: IdemContext,
-    user_id: uuid.UUID,
+    user_id: uuid.UUID | None = None,
+    resource_id: uuid.UUID | None = None,
 ) -> IdempotencyKey:
-    """Add (no commit) — caller commits with the rest of the transaction."""
+    """Add (no commit) — caller commits with the rest of the transaction.
+    `user_id` is used by onboarding; `resource_id` by other creates."""
     row = IdempotencyKey(
         endpoint=endpoint,
         key=ctx.key,
         owner_fp=ctx.owner_fp,
         request_fp=ctx.request_fp,
         user_id=user_id,
+        resource_id=resource_id,
     )
     session.add(row)
     session.flush()
     return row
+
+
+RECORDS_ENDPOINT = "records.upload"
