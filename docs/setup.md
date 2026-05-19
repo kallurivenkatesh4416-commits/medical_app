@@ -30,6 +30,16 @@ Then:
 - Slice 5 dashboard feed: login as a seeded doctor, paste the access token into
   the dashboard, then create a resident alert via `POST /api/v1/emergency/alerts`.
   In `PROVIDER_MODE=stub`, the push attempt is logged as `stub-push`.
+- Slice 6: the alert fans out push **+** SMS **+** voice (stub logs
+  `stub-push` / `stub-sms` / `stub-voice`, one `notification_attempts` row
+  each). Schedule duty via `on_call_schedules`. Drive the no-ack path with
+  `POST /api/v1/emergency/escalations/run` as an `ops` user (this is the
+  manual trigger until scheduler infra lands). The mobile app's
+  "I Need Medical Help" button shows the offline-retry state and, after
+  `EMERGENCY_ACK_TIMEOUT_SECONDS` with no ack, the fallback action sheet
+  (numbers from `/emergency/alerts/{id}/fallback-numbers`; 108/112 always
+  reachable offline). Real Twilio/FCM delivery needs `PROVIDER_MODE=live`
+  plus the Twilio + FCM keys in `.env`.
 
 ## Backend dev (without Docker)
 
@@ -57,6 +67,9 @@ real SMS provider. Seeded demo phones are `+15550000001`…`+15550000009`
 See `.env.example` (annotated). Provider keys (Twilio/FCM/AWS) are only needed from
 the slice that uses them; default `PROVIDER_MODE=stub` needs no external accounts.
 
-_Status: Slices 1-5 cover backend foundation, auth/RBAC/audit,
-onboarding/consent/profile, medical-record upload/list/link, and the emergency
-happy path with dashboard feed. Mobile emergency/offline steps continue in Slice 6._
+_Status: Slices 1-6 cover backend foundation, auth/RBAC/audit,
+onboarding/consent/profile, medical-record upload/list/link, the emergency
+happy path with dashboard feed, and emergency hardening (3-channel fan-out,
+on-call resolution, 60s backup escalation, mobile offline retry + fallback
+sheet). Live Twilio/FCM is verified with operator keys. Case lifecycle is
+Slice 7._

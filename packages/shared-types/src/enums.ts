@@ -77,5 +77,18 @@ export const CaseNoteType = {
 } as const;
 export type CaseNoteType = (typeof CaseNoteType)[keyof typeof CaseNoteType];
 
+/**
+ * Targets on the mobile 60s failed-alert fallback sheet (PLAN.md Slice 6).
+ * Every tap records a `case_events` row with the chosen channel.
+ */
+export const FallbackChannel = {
+  DOCTOR: "doctor",
+  EMERGENCY_108: "emergency_108",
+  EMERGENCY_112: "emergency_112",
+  FAMILY_PRIMARY: "family_primary",
+  SECURITY_DESK: "security_desk",
+} as const;
+export type FallbackChannel = (typeof FallbackChannel)[keyof typeof FallbackChannel];
+
 /** National emergency numbers — the ONLY hardcoded fallback numbers (brief §2.2). */
 export const NATIONAL_EMERGENCY_NUMBERS = ["108", "112"] as const;

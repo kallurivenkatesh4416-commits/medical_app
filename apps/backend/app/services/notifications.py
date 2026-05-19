@@ -2,8 +2,13 @@
 abstraction). Business logic depends only on this Protocol; the concrete
 provider is chosen by PROVIDER_MODE.
 
-Slice 2 only needs SMS (OTP delivery). Push + voice land in Slices 5/6; their
-methods are declared now so the interface is stable and swappable.
+Slice 2 only needs SMS (OTP delivery). Push lands in Slice 5; the Slice 6
+emergency fan-out exercises all three (`send_push` + `send_sms` +
+`place_voice_call`) and logs each independently. The stub returns a stable
+provider ref per channel so the whole fan-out — including "kill push, others
+still deliver" — is testable with zero external deps. The concrete live
+Twilio/FCM gateway is wired on `provider_mode='live'` once the operator
+supplies keys (PLAN.md Slice 6 "Needs your keys: Twilio + FCM").
 """
 
 from typing import Protocol
@@ -47,7 +52,13 @@ def get_notification_gateway() -> NotificationGateway:
     mode = get_settings().provider_mode
     if mode == "stub":
         return StubNotificationGateway()
-    # Live Twilio/FCM gateway lands with Slices 5/6 (needs the user's keys).
+    # The concrete live gateway is constructed here once the operator supplies
+    # Twilio (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_SMS_FROM /
+    # TWILIO_VOICE_FROM) and FCM (FCM_SERVICE_ACCOUNT_FILE) credentials. The
+    # fan-out orchestration, escalation, and fallback are provider-agnostic and
+    # fully covered against the stub; live wiring is verified with real keys
+    # (PLAN.md Slice 6 "Needs your keys: Twilio + FCM").
     raise NotImplementedError(
-        f"provider_mode='{mode}' not available until the notification slices"
+        f"provider_mode='{mode}' requires Twilio + FCM credentials "
+        "(see .env.example); only provider_mode='stub' runs without keys"
     )

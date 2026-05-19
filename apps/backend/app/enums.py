@@ -62,6 +62,17 @@ class NotificationStatus(StrEnum):
     ACKNOWLEDGED = "acknowledged"
 
 
+class FallbackChannel(StrEnum):
+    """Targets on the mobile 60s failed-alert fallback sheet. Every tap writes
+    a ``case_events`` row with the chosen channel (PLAN.md Slice 6)."""
+
+    DOCTOR = "doctor"
+    EMERGENCY_108 = "emergency_108"
+    EMERGENCY_112 = "emergency_112"
+    FAMILY_PRIMARY = "family_primary"
+    SECURITY_DESK = "security_desk"
+
+
 class ConsentType(StrEnum):
     DATA_STORAGE = "data_storage"
     EMERGENCY_SHARE_WITH_DOCTOR = "emergency_share_with_doctor"
@@ -107,3 +118,6 @@ class AuditAction(StrEnum):
     RECORD_LINK_ISSUED = "record_link_issued"
     EMERGENCY_ALERT_CREATED = "emergency_alert_created"
     EMERGENCY_ALERT_LIST = "emergency_alert_list"
+    EMERGENCY_ALERT_ESCALATED = "emergency_alert_escalated"
+    EMERGENCY_FALLBACK_NUMBERS_READ = "emergency_fallback_numbers_read"
+    EMERGENCY_FALLBACK_INVOKED = "emergency_fallback_invoked"

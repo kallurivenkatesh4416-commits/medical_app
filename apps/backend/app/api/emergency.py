@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Header, Request
 from pydantic import BaseModel, Field
 from sqlmodel import Session
 
-from app.enums import Role
+from app.enums import FallbackChannel, Role
 from app.models.user import User
 from app.security.deps import client_ip, forbid_phi_roles, get_db, require_roles
 from app.services import emergency_service, idempotency
@@ -18,6 +18,7 @@ router = APIRouter(prefix="/api/v1", tags=["emergency"])
 
 resident_only = require_roles(Role.RESIDENT)
 alert_feed_roles = require_roles(Role.DOCTOR, Role.NURSE, Role.OPS)
+ops_only = require_roles(Role.OPS)
 idempotency_key_header = Header(default=None, alias="Idempotency-Key")
 
 
@@ -58,6 +59,29 @@ class AlertOut(BaseModel):
     location_text: str | None
     assigned_doctor_id: uuid.UUID | None
     notification_attempts: list[NotificationAttemptOut]
+
+
+class FallbackNumbersOut(BaseModel):
+    case_id: uuid.UUID
+    doctor: str | None
+    emergency_108: str
+    emergency_112: str
+    family_primary: str | None
+    security_desk: str | None
+
+
+class FallbackTapIn(BaseModel):
+    channel: FallbackChannel
+
+
+class FallbackTapOut(BaseModel):
+    case_id: uuid.UUID
+    channel: str
+    recorded: bool
+
+
+class EscalationRunOut(BaseModel):
+    escalated_case_ids: list[uuid.UUID]
 
 
 @router.post("/devices/push-token", response_model=PushTokenOut)
@@ -128,4 +152,58 @@ def active_emergency_alerts(
 ) -> list[dict]:
     return emergency_service.list_active_alerts(
         session, actor=actor, from_ip=client_ip(request)
+    )
+
+
+@router.post("/emergency/escalations/run", response_model=EscalationRunOut)
+def run_backup_escalation(
+    request: Request,
+    actor: User = Depends(ops_only),
+    session: Session = Depends(get_db),
+) -> EscalationRunOut:
+    """Page the backup doctor for alerts with no acknowledgment within the
+    configured window. Tenant-scoped to the ops actor's project. This is the
+    documented manual entry point until background-worker infra lands; a
+    scheduler will call the same service function then."""
+    ids = emergency_service.escalate_stale_alerts(
+        session,
+        project_id=actor.project_id,
+        actor_user_id=actor.id,
+        from_ip=client_ip(request),
+    )
+    return EscalationRunOut(escalated_case_ids=ids)
+
+
+@router.get(
+    "/emergency/alerts/{case_id}/fallback-numbers",
+    response_model=FallbackNumbersOut,
+)
+def emergency_fallback_numbers(
+    case_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(resident_only),
+    session: Session = Depends(get_db),
+) -> dict:
+    return emergency_service.fallback_numbers(
+        session, case_id=case_id, user=user, from_ip=client_ip(request)
+    )
+
+
+@router.post(
+    "/emergency/alerts/{case_id}/fallback",
+    response_model=FallbackTapOut,
+)
+def emergency_fallback_tap(
+    case_id: uuid.UUID,
+    body: FallbackTapIn,
+    request: Request,
+    user: User = Depends(resident_only),
+    session: Session = Depends(get_db),
+) -> dict:
+    return emergency_service.record_fallback(
+        session,
+        case_id=case_id,
+        user=user,
+        channel=body.channel,
+        from_ip=client_ip(request),
     )

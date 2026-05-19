@@ -59,4 +59,15 @@
   stores staff push tokens for the local/dashboard happy path. Emergency alert
   idempotency also uses `idempotency_keys.resource_id`.
 
+- **Slice 6** (migration `0006_on_call_schedules`): `on_call_schedules`
+  (`project_id`, `role`, `user_id`, `starts_at`, `ends_at`, `is_backup`,
+  optional `contact_phone` duty line). Fan-out resolves the *active primary*
+  for a role; the no-ack timer escalates to the *active backup*. Primary-doctor
+  resolution keeps a documented conservative fallback (first active doctor by
+  `created_at`) so an alert is never doctor-less; *backup* has no fallback.
+  No new emergency tables — backup escalation and fallback taps reuse
+  `case_events` (`backup_escalated`, `fallback_invoked`); the
+  `backup_escalated` row is the escalation idempotency marker. Lifecycle
+  status transitions remain Slice 7.
+
 _Schema continues to grow per slice._

@@ -31,5 +31,35 @@
   exposes the doctor/nurse/ops active-alert feed.
 - The dashboard polls `/api/v1/emergency/alerts/active` and shows the live red
   alert banner once a doctor token is supplied.
-- Still Slice 6: SMS, voice, active `on_call_schedules`, backup escalation,
-  mobile offline queue/retry, and the 60s fallback action sheet.
+## Slice 6 status
+
+- **3-channel fan-out:** alert creation now pages the on-call doctor over FCM
+  push **+** SMS **+** voice. Each channel logs to `notification_attempts`
+  independently; one channel failing (no push token, provider exception) never
+  blocks the others or the case. Commit-before-send ordering preserved.
+- **On-call resolution:** primary doctor / backup doctor / security desk are
+  resolved from `on_call_schedules` (active window, `is_backup` flag).
+  Primary doctor falls back to "first active doctor" only when no schedule
+  exists (documented, so an alert is never doctor-less). Backup has no fallback.
+- **60s backup escalation:** `escalate_stale_alerts` pages the active backup
+  for ALERTED cases with no `acknowledged_at` past
+  `EMERGENCY_ACK_TIMEOUT_SECONDS`. Idempotent via the `backup_escalated`
+  `case_events` marker; writes `EMERGENCY_ALERT_ESCALATED` audit. Triggered by
+  `POST /emergency/escalations/run` (ops-only) until scheduler infra lands.
+- **Security desk (opt-in, minimum-necessary):** only when
+  `project.enable_security_desk_alerts` **and** a security-desk on-call exists.
+  Payload is name + flat/villa + location + primary contact phone + case id —
+  never symptoms/vitals/history/notes/records.
+- **Mobile:** one-tap "I Need Medical Help" → send → offline queue retrying
+  every 5s in the background → a 60s countdown that, on no server ack, opens a
+  large high-contrast fallback sheet (Call doctor / 108 / 112 / primary family
+  / security desk — last two only when resolved). Every tap dials and records
+  a `case_events` row via `POST /emergency/alerts/{id}/fallback`; the original
+  alert keeps retrying (the countdown never cancels it). All numbers except
+  108/112 come from `GET /emergency/alerts/{id}/fallback-numbers`.
+- **Live providers:** the fan-out is provider-agnostic and fully covered
+  against the stub (including "kill push, others still deliver"). The concrete
+  live Twilio/FCM gateway is wired on `PROVIDER_MODE=live` once the operator
+  supplies keys (PLAN.md Slice 6 "Needs your keys") — verified end-to-end with
+  real keys, not in CI.
+- Still Slice 7: case lifecycle (`acknowledged`→…→`closed`), vitals, notes.

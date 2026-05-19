@@ -108,6 +108,39 @@
   then updated to sent/failed. A provider crash cannot leave only an external
   notification with no persisted case.
 
+## Slice 6 implementation notes (emergency hardening)
+
+- The 3-channel fan-out (push/SMS/voice) keeps PHI out of every channel body:
+  SMS/push say only "a resident needs medical help, open the app" — no
+  symptoms, vitals, or history (SMS/push are not confidential channels). The
+  secure detail stays behind auth in the app feed.
+- `notification_attempts` still stores **only** channel/status/provider
+  ref/error/recipient — never a message body. The stub gateway logs a masked
+  recipient only. One channel failing is logged and swallowed; it never blocks
+  the case or the other channels.
+- Security-desk fan-out is opt-in (`enable_security_desk_alerts`) **and** only
+  when a security-desk on-call exists. The constructed payload is exactly the
+  minimum-necessary set — name, flat/villa, location text, primary contact
+  phone, case id — and nothing else. This remains `[NEEDS_LEGAL_REVIEW]`
+  item #7 (the code does not decide that the set is sufficient; it only
+  enforces "no more than this").
+- Backup escalation transitions **no** case status (lifecycle is Slice 7); it
+  only detects "no ack in the configured window", pages the backup, and writes
+  `case_events.backup_escalated` + an `EMERGENCY_ALERT_ESCALATED` audit row.
+- Every mobile fallback tap writes `case_events.fallback_invoked` (channel
+  only) + an `EMERGENCY_FALLBACK_INVOKED` audit row; fallback-number reads
+  write `EMERGENCY_FALLBACK_NUMBERS_READ`. The dialer fallback for
+  108/112/on-call doctor remains `[NEEDS_LEGAL_REVIEW]` item #9 (unchanged —
+  implementation does not resolve it).
+- Fallback numbers are resolved from backend state (project / on-call
+  schedule / resident contacts); only 108/112 are hardcoded constants
+  (brief §2.2). The fallback endpoints are owner-scoped (404 for non-owners,
+  no existence leak), consistent with the Slice 3/4 tenant-isolation pattern.
+- Concrete live Twilio/FCM remains gated on operator-supplied keys; the
+  fan-out/escalation/fallback orchestration is provider-agnostic and fully
+  covered against the stub. No diagnosis language in any channel body, audit,
+  or log.
+
 ## Open questions — `[NEEDS_LEGAL_REVIEW]`
 
 1. `[NEEDS_LEGAL_REVIEW]` DPDP cross-border data: acceptable AWS S3 region for

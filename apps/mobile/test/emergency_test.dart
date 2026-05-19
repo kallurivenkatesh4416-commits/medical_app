@@ -1,0 +1,164 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:med_emergency_mobile/emergency.dart';
+import 'package:med_emergency_mobile/main.dart' show UriLauncher;
+
+EmergencyController _controller({
+  required AlertSender sender,
+  AckChecker? ack,
+  FallbackNumbersFetcher? numbers,
+  FallbackRecorder? recorder,
+  Duration retry = const Duration(milliseconds: 50),
+  Duration ackWindow = const Duration(seconds: 30),
+}) {
+  return EmergencyController(
+    sender: sender,
+    ackChecker: ack ?? (_) async => false,
+    numbersFetcher: numbers ?? (_) async => FallbackNumbers.offline,
+    recorder: recorder ?? (_, __) async {},
+    retryInterval: retry,
+    ackWindow: ackWindow,
+  );
+}
+
+Future<void> _pump(WidgetTester tester, EmergencyController c,
+    {UriLauncher? launcher}) async {
+  await tester.pumpWidget(
+    MaterialApp(
+      home: EmergencyScreen(
+        controller: c,
+        launcher: launcher ?? (_) async => true,
+      ),
+    ),
+  );
+}
+
+void main() {
+  testWidgets('One tap sends the alert and shows "Alert sent"', (tester) async {
+    var calls = 0;
+    final c = _controller(sender: () async {
+      calls++;
+      return const AlertResult(ok: true, caseId: 'case-1');
+    });
+
+    await _pump(tester, c);
+    await tester.tap(find.widgetWithText(FilledButton, 'I Need Medical Help'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(calls, 1);
+    expect(find.textContaining('Alert sent'), findsOneWidget);
+    c.dispose();
+  });
+
+  testWidgets('Failed send shows Retrying and keeps retrying in background',
+      (tester) async {
+    var calls = 0;
+    final c = _controller(
+      sender: () async {
+        calls++;
+        return const AlertResult(ok: false);
+      },
+    );
+
+    await _pump(tester, c);
+    await tester.tap(find.widgetWithText(FilledButton, 'I Need Medical Help'));
+    await tester.pump();
+    await tester.pump();
+    expect(calls, 1);
+    expect(find.textContaining('Retrying'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.pump();
+    expect(calls, greaterThanOrEqualTo(2));
+    c.dispose();
+  });
+
+  testWidgets('No ack within the window surfaces the fallback sheet',
+      (tester) async {
+    final c = _controller(
+      sender: () async => const AlertResult(ok: true, caseId: 'case-9'),
+      ack: (_) async => false,
+      numbers: (_) async => const FallbackNumbers(
+        emergency108: '108',
+        emergency112: '112',
+        doctor: '+15550009999',
+        familyPrimary: '+15557770001',
+        securityDesk: '+15550007777',
+      ),
+      ackWindow: const Duration(milliseconds: 50),
+    );
+
+    await _pump(tester, c);
+    await tester.tap(find.widgetWithText(FilledButton, 'I Need Medical Help'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 60));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Call doctor'), findsOneWidget);
+    expect(find.text('Call 108'), findsOneWidget);
+    expect(find.text('Call 112'), findsOneWidget);
+    expect(find.text('Call primary family contact'), findsOneWidget);
+    expect(find.text('Call security desk'), findsOneWidget);
+    c.dispose();
+  });
+
+  testWidgets('Fallback tap records the channel and dials the number',
+      (tester) async {
+    Uri? launched;
+    final recorded = <String>[];
+    final c = _controller(
+      sender: () async => const AlertResult(ok: true, caseId: 'case-7'),
+      ack: (_) async => false,
+      numbers: (_) async => const FallbackNumbers(
+        emergency108: '108',
+        emergency112: '112',
+        doctor: '+15550001111',
+      ),
+      recorder: (caseId, channel) async => recorded.add('$caseId:$channel'),
+      ackWindow: const Duration(milliseconds: 50),
+    );
+
+    await _pump(tester, c, launcher: (uri) async {
+      launched = uri;
+      return true;
+    });
+    await tester.tap(find.widgetWithText(FilledButton, 'I Need Medical Help'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 60));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Call doctor'));
+    await tester.pumpAndSettle();
+
+    expect(launched, isNotNull);
+    expect(launched!.scheme, 'tel');
+    expect(launched!.path, '+15550001111');
+    expect(recorded, ['case-7:doctor']);
+    c.dispose();
+  });
+
+  testWidgets('Security desk / family buttons hidden when not resolved',
+      (tester) async {
+    final c = _controller(
+      sender: () async => const AlertResult(ok: true, caseId: 'case-3'),
+      ack: (_) async => false,
+      numbers: (_) async =>
+          const FallbackNumbers(emergency108: '108', emergency112: '112'),
+      ackWindow: const Duration(milliseconds: 50),
+    );
+
+    await _pump(tester, c);
+    await tester.tap(find.widgetWithText(FilledButton, 'I Need Medical Help'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 60));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Call 108'), findsOneWidget);
+    expect(find.text('Call 112'), findsOneWidget);
+    expect(find.text('Call security desk'), findsNothing);
+    expect(find.text('Call primary family contact'), findsNothing);
+    expect(find.text('Call doctor'), findsNothing);
+    c.dispose();
+  });
+}

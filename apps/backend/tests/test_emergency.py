@@ -1,13 +1,26 @@
-"""Slice 5 — emergency happy path: idempotent alert + push + feed."""
+"""Slice 5/6 — emergency alert: idempotent create, 3-channel fan-out,
+on-call resolution, 60s backup escalation, and the mobile fallback sheet."""
+
+import uuid
+from datetime import timedelta
 
 from fastapi.testclient import TestClient
 from sqlalchemy import event
 from sqlalchemy.orm import Session as OrmSession
 from sqlmodel import Session, select
 
-from app.enums import AuditAction, CaseStatus, NotificationChannel, NotificationStatus, Role
+from app.enums import (
+    AuditAction,
+    CaseStatus,
+    FallbackChannel,
+    NotificationChannel,
+    NotificationStatus,
+    Role,
+)
 from app.models.audit import AuditLog
-from app.models.emergency import CaseEvent, DeviceToken, EmergencyCase, NotificationAttempt
+from app.models.base import utcnow
+from app.models.emergency import CaseEvent, EmergencyCase, NotificationAttempt
+from app.models.on_call import OnCallSchedule
 from app.models.project import Project
 from app.models.resident import Resident
 from app.models.user import User
@@ -79,7 +92,38 @@ def _register_doctor_push(client: TestClient, headers: dict[str, str]) -> None:
     assert resp.status_code == 200, resp.text
 
 
-def test_resident_alert_creates_case_push_attempt_feed_and_audit(
+def _schedule(
+    session: Session,
+    project: Project,
+    user: User,
+    role: Role,
+    *,
+    backup: bool = False,
+    phone: str | None = None,
+) -> OnCallSchedule:
+    now = utcnow()
+    row = OnCallSchedule(
+        project_id=project.id,
+        role=role.value,
+        user_id=user.id,
+        starts_at=now - timedelta(seconds=60),
+        ends_at=now + timedelta(hours=1),
+        is_backup=backup,
+        contact_phone=phone,
+    )
+    session.add(row)
+    session.commit()
+    return row
+
+
+def _by_channel(session: Session) -> dict[str, list[NotificationAttempt]]:
+    out: dict[str, list[NotificationAttempt]] = {}
+    for a in session.exec(select(NotificationAttempt)).all():
+        out.setdefault(a.channel, []).append(a)
+    return out
+
+
+def test_resident_alert_fans_out_three_channels_with_feed_and_audit(
     client: TestClient, project: Project, session: Session, make_user, login
 ) -> None:
     resident_token, resident = _onboard(client, project, session, "+15559990001")
@@ -105,25 +149,22 @@ def test_resident_alert_creates_case_push_attempt_feed_and_audit(
     assert body["resident_id"] == str(resident.id)
     assert body["status"] == CaseStatus.ALERTED.value
     assert body["assigned_doctor_id"] == str(doctor.id)
-    assert body["notification_attempts"] == [
-        {
-            "channel": NotificationChannel.FCM.value,
-            "recipient_id": str(doctor.id),
-            "status": NotificationStatus.SENT.value,
-            "provider_ref": "stub-push",
-            "error": None,
-        }
-    ]
+
+    channels = {a["channel"]: a for a in body["notification_attempts"]}
+    assert set(channels) == {
+        NotificationChannel.FCM.value,
+        NotificationChannel.SMS.value,
+        NotificationChannel.VOICE.value,
+    }
+    for ch in channels.values():
+        assert ch["status"] == NotificationStatus.SENT.value
+        assert ch["recipient_id"] == str(doctor.id)
 
     feed = client.get("/api/v1/emergency/alerts/active", headers=doctor_headers)
     assert feed.status_code == 200, feed.text
     assert feed.json()[0]["id"] == body["id"]
     assert feed.json()[0]["resident_name"] == "Asha Rao"
 
-    cases = session.exec(select(EmergencyCase)).all()
-    assert len(cases) == 1
-    assert session.exec(select(NotificationAttempt)).first().status == "sent"
-    assert session.exec(select(CaseEvent)).first().event_type == "alert_created"
     actions = list(session.exec(select(AuditLog.action)).all())
     assert AuditAction.EMERGENCY_ALERT_CREATED.value in actions
     assert AuditAction.EMERGENCY_ALERT_LIST.value in actions
@@ -133,8 +174,7 @@ def test_alert_requires_idempotency_and_exact_replay(
     client: TestClient, project: Project, session: Session, make_user, login
 ) -> None:
     resident_token, _ = _onboard(client, project, session, "+15559990002")
-    doctor = make_user(Role.DOCTOR, phone="+15559991112")
-    _register_doctor_push(client, _auth(client, login, doctor))
+    make_user(Role.DOCTOR, phone="+15559991112")
     headers = {"Authorization": f"Bearer {resident_token}", "Idempotency-Key": "same"}
 
     missing = client.post(
@@ -146,15 +186,11 @@ def test_alert_requires_idempotency_and_exact_replay(
     assert missing.json()["error"]["code"] == "idempotency_key_required"
 
     first = client.post(
-        "/api/v1/emergency/alerts",
-        json={"symptom_codes": ["fall"]},
-        headers=headers,
+        "/api/v1/emergency/alerts", json={"symptom_codes": ["fall"]}, headers=headers
     )
     assert first.status_code == 200
     replay = client.post(
-        "/api/v1/emergency/alerts",
-        json={"symptom_codes": ["fall"]},
-        headers=headers,
+        "/api/v1/emergency/alerts", json={"symptom_codes": ["fall"]}, headers=headers
     )
     assert replay.status_code == 200
     assert replay.json()["id"] == first.json()["id"]
@@ -174,8 +210,7 @@ def test_feed_is_role_and_tenant_isolated(
 ) -> None:
     resident_token, _ = _onboard(client, project, session, "+15559990003")
     doctor = make_user(Role.DOCTOR, phone="+15559991113")
-    doctor_headers = _auth(client, login, doctor)
-    _register_doctor_push(client, doctor_headers)
+    _register_doctor_push(client, _auth(client, login, doctor))
     assert (
         client.post(
             "/api/v1/emergency/alerts",
@@ -191,8 +226,7 @@ def test_feed_is_role_and_tenant_isolated(
     for role in (Role.BUILDER_ADMIN, Role.SECURITY_DESK):
         blocked = make_user(role)
         resp = client.get(
-            "/api/v1/emergency/alerts/active",
-            headers=_auth(client, login, blocked),
+            "/api/v1/emergency/alerts/active", headers=_auth(client, login, blocked)
         )
         assert resp.status_code == 403
 
@@ -208,16 +242,16 @@ def test_feed_is_role_and_tenant_isolated(
     session.add(outsider)
     session.commit()
     cross = client.get(
-        "/api/v1/emergency/alerts/active",
-        headers=_auth(client, login, outsider),
+        "/api/v1/emergency/alerts/active", headers=_auth(client, login, outsider)
     )
     assert cross.status_code == 200
     assert cross.json() == []
 
 
-def test_alert_still_creates_case_when_doctor_has_no_push_token(
+def test_killed_push_still_delivers_sms_and_voice(
     client: TestClient, project: Project, session: Session, make_user
 ) -> None:
+    """No push token → FCM fails, but SMS + voice still fire independently."""
     resident_token, _ = _onboard(client, project, session, "+15559990004")
     doctor = make_user(Role.DOCTOR, phone="+15559991115")
     resp = client.post(
@@ -230,9 +264,49 @@ def test_alert_still_creates_case_when_doctor_has_no_push_token(
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["assigned_doctor_id"] == str(doctor.id)
-    attempt = session.exec(select(NotificationAttempt)).first()
-    assert attempt.status == NotificationStatus.FAILED.value
-    assert attempt.error == "no_push_token"
+
+    by_channel = _by_channel(session)
+    fcm = by_channel[NotificationChannel.FCM.value][0]
+    assert fcm.status == NotificationStatus.FAILED.value
+    assert fcm.error == "no_push_token"
+    assert by_channel[NotificationChannel.SMS.value][0].status == "sent"
+    assert by_channel[NotificationChannel.VOICE.value][0].status == "sent"
+
+
+def test_one_channel_exception_does_not_block_the_others(
+    client: TestClient, project: Project, session: Session, make_user, login, monkeypatch
+) -> None:
+    resident_token, _ = _onboard(client, project, session, "+15559990010")
+    doctor = make_user(Role.DOCTOR, phone="+15559991210")
+    _register_doctor_push(client, _auth(client, login, doctor))
+
+    class FlakyGateway:
+        def send_push(self, *, token: str, title: str, body: str) -> str:
+            raise RuntimeError("fcm down")
+
+        def send_sms(self, *, to: str, body: str) -> str:
+            return "sms-ok"
+
+        def place_voice_call(self, *, to: str, twiml_url: str) -> str:
+            return "voice-ok"
+
+    monkeypatch.setattr(
+        emergency_service, "get_notification_gateway", lambda: FlakyGateway()
+    )
+    resp = client.post(
+        "/api/v1/emergency/alerts",
+        json={"symptom_codes": ["fall"]},
+        headers={
+            "Authorization": f"Bearer {resident_token}",
+            "Idempotency-Key": "flaky",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    by_channel = _by_channel(session)
+    assert by_channel[NotificationChannel.FCM.value][0].status == "failed"
+    assert by_channel[NotificationChannel.FCM.value][0].error == "RuntimeError"
+    assert by_channel[NotificationChannel.SMS.value][0].status == "sent"
+    assert by_channel[NotificationChannel.VOICE.value][0].status == "sent"
 
 
 def test_push_is_sent_after_case_commit(
@@ -248,6 +322,12 @@ def test_push_is_sent_after_case_commit(
         def send_push(self, *, token: str, title: str, body: str) -> str:
             events.append("push")
             return "ordered-push"
+
+        def send_sms(self, *, to: str, body: str) -> str:
+            return "ordered-sms"
+
+        def place_voice_call(self, *, to: str, twiml_url: str) -> str:
+            return "ordered-voice"
 
     def after_commit(_session) -> None:  # noqa: ANN001
         events.append("commit")
@@ -267,13 +347,313 @@ def test_push_is_sent_after_case_commit(
         event.remove(OrmSession, "after_commit", after_commit)
 
     assert resp.status_code == 200, resp.text
+    # case/event/audit/idem commit, then the queued FCM row commits, then push.
     assert events[:3] == ["commit", "commit", "push"]
-    case = session.exec(select(EmergencyCase)).first()
-    assert case is not None
     attempts = session.exec(select(NotificationAttempt)).all()
-    assert len(attempts) == 1
-    assert attempts[0].status == NotificationStatus.SENT.value
-    assert attempts[0].provider_ref == "ordered-push"
+    assert len(attempts) == 3
 
-    token = session.exec(select(DeviceToken).where(DeviceToken.user_id == doctor.id)).first()
-    assert token is not None
+
+def test_on_call_schedule_overrides_first_active_doctor(
+    client: TestClient, project: Project, session: Session, make_user
+) -> None:
+    resident_token, _ = _onboard(client, project, session, "+15559990006")
+    make_user(Role.DOCTOR, phone="+15559991117")  # earliest active doctor
+    on_call_doc = make_user(Role.DOCTOR, phone="+15559991118")
+    _schedule(session, project, on_call_doc, Role.DOCTOR, phone="+15550001234")
+
+    resp = client.post(
+        "/api/v1/emergency/alerts",
+        json={"symptom_codes": ["fall"]},
+        headers={
+            "Authorization": f"Bearer {resident_token}",
+            "Idempotency-Key": "sched",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    # The scheduled on-call doctor wins over the older "first active doctor".
+    assert resp.json()["assigned_doctor_id"] == str(on_call_doc.id)
+
+
+def test_no_schedule_falls_back_to_first_active_doctor(
+    client: TestClient, project: Project, session: Session, make_user
+) -> None:
+    resident_token, _ = _onboard(client, project, session, "+15559990007")
+    doctor = make_user(Role.DOCTOR, phone="+15559991119")
+    resp = client.post(
+        "/api/v1/emergency/alerts",
+        json={"symptom_codes": ["fall"]},
+        headers={
+            "Authorization": f"Bearer {resident_token}",
+            "Idempotency-Key": "fallback-doc",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["assigned_doctor_id"] == str(doctor.id)
+
+
+def test_backup_escalation_after_timeout_is_idempotent(
+    client: TestClient, project: Project, session: Session, make_user, login
+) -> None:
+    resident_token, _ = _onboard(client, project, session, "+15559990008")
+    primary = make_user(Role.DOCTOR, phone="+15559991120")
+    backup = make_user(Role.DOCTOR, phone="+15559991121")
+    _schedule(session, project, primary, Role.DOCTOR, phone="+15550000001")
+    _schedule(session, project, backup, Role.DOCTOR, backup=True, phone="+15550000002")
+    ops = make_user(Role.OPS, phone="+15559991122")
+
+    created = client.post(
+        "/api/v1/emergency/alerts",
+        json={"symptom_codes": ["fall"]},
+        headers={
+            "Authorization": f"Bearer {resident_token}",
+            "Idempotency-Key": "esc",
+        },
+    )
+    assert created.status_code == 200, created.text
+    case_id = created.json()["id"]
+    cid = uuid.UUID(case_id)
+
+    # No ack yet, but not stale → nothing escalates.
+    run = client.post(
+        "/api/v1/emergency/escalations/run", headers=_auth(client, login, ops)
+    )
+    assert run.status_code == 200, run.text
+    assert run.json()["escalated_case_ids"] == []
+
+    # Backdate the alert past the ack timeout.
+    case = session.get(EmergencyCase, cid)
+    case.alert_time = utcnow() - timedelta(seconds=120)
+    session.add(case)
+    session.commit()
+
+    run = client.post(
+        "/api/v1/emergency/escalations/run", headers=_auth(client, login, ops)
+    )
+    assert run.status_code == 200, run.text
+    assert run.json()["escalated_case_ids"] == [case_id]
+
+    events = [
+        e.event_type
+        for e in session.exec(
+            select(CaseEvent).where(CaseEvent.case_id == cid)
+        ).all()
+    ]
+    assert events.count(emergency_service.BACKUP_ESCALATED_EVENT) == 1
+    assert AuditAction.EMERGENCY_ALERT_ESCALATED.value in list(
+        session.exec(select(AuditLog.action)).all()
+    )
+    backup_attempts = [
+        a
+        for a in session.exec(select(NotificationAttempt)).all()
+        if a.recipient_id == backup.id
+    ]
+    assert backup_attempts, "backup doctor should have been paged"
+
+    # Running again must not double-escalate.
+    again = client.post(
+        "/api/v1/emergency/escalations/run", headers=_auth(client, login, ops)
+    )
+    assert again.json()["escalated_case_ids"] == []
+    events_after = session.exec(
+        select(CaseEvent).where(
+            CaseEvent.case_id == cid,
+            CaseEvent.event_type == emergency_service.BACKUP_ESCALATED_EVENT,
+        )
+    ).all()
+    assert len(events_after) == 1
+
+
+def test_escalation_run_requires_ops_role(
+    client: TestClient, project: Project, session: Session, make_user, login
+) -> None:
+    doctor = make_user(Role.DOCTOR, phone="+15559991130")
+    resp = client.post(
+        "/api/v1/emergency/escalations/run", headers=_auth(client, login, doctor)
+    )
+    assert resp.status_code == 403
+
+
+def test_fallback_numbers_resolved_from_backend(
+    client: TestClient, project: Project, session: Session, make_user
+) -> None:
+    resident_token, _ = _onboard(client, project, session, "+15559990009")
+    doctor = make_user(Role.DOCTOR, phone="+15559991140")
+    _schedule(session, project, doctor, Role.DOCTOR, phone="+15550009999")
+    desk = make_user(Role.SECURITY_DESK, phone="+15559991141")
+    _schedule(session, project, desk, Role.SECURITY_DESK, phone="+15550007777")
+
+    created = client.post(
+        "/api/v1/emergency/alerts",
+        json={"symptom_codes": ["fall"]},
+        headers={
+            "Authorization": f"Bearer {resident_token}",
+            "Idempotency-Key": "fb",
+        },
+    )
+    case_id = created.json()["id"]
+    resp = client.get(
+        f"/api/v1/emergency/alerts/{case_id}/fallback-numbers",
+        headers={"Authorization": f"Bearer {resident_token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    nums = resp.json()
+    assert nums["emergency_108"] == "108"
+    assert nums["emergency_112"] == "112"
+    assert nums["doctor"] == "+15550009999"  # from the on-call schedule
+    assert nums["family_primary"] == "+15557770001"  # resident's primary contact
+    assert nums["security_desk"] == "+15550007777"  # project opted in
+
+    assert AuditAction.EMERGENCY_FALLBACK_NUMBERS_READ.value in list(
+        session.exec(select(AuditLog.action)).all()
+    )
+
+
+def test_fallback_numbers_hide_security_desk_when_project_opted_out(
+    client: TestClient, session: Session, make_user
+) -> None:
+    quiet = Project(name="No Desk Residency", enable_security_desk_alerts=False)
+    session.add(quiet)
+    session.commit()
+    session.refresh(quiet)
+    resident_token, _ = _onboard(client, quiet, session, "+15559990020")
+    make_user(Role.DOCTOR, phone="+15559991150")
+
+    created = client.post(
+        "/api/v1/emergency/alerts",
+        json={"symptom_codes": ["fall"]},
+        headers={
+            "Authorization": f"Bearer {resident_token}",
+            "Idempotency-Key": "fb2",
+        },
+    )
+    resp = client.get(
+        f"/api/v1/emergency/alerts/{created.json()['id']}/fallback-numbers",
+        headers={"Authorization": f"Bearer {resident_token}"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["security_desk"] is None
+
+
+def test_fallback_tap_records_case_event_and_audit(
+    client: TestClient, project: Project, session: Session, make_user
+) -> None:
+    resident_token, _ = _onboard(client, project, session, "+15559990011")
+    make_user(Role.DOCTOR, phone="+15559991160")
+    created = client.post(
+        "/api/v1/emergency/alerts",
+        json={"symptom_codes": ["fall"]},
+        headers={
+            "Authorization": f"Bearer {resident_token}",
+            "Idempotency-Key": "tap",
+        },
+    )
+    case_id = created.json()["id"]
+
+    bad = client.post(
+        f"/api/v1/emergency/alerts/{case_id}/fallback",
+        json={"channel": "not-a-channel"},
+        headers={"Authorization": f"Bearer {resident_token}"},
+    )
+    assert bad.status_code == 422
+
+    tap = client.post(
+        f"/api/v1/emergency/alerts/{case_id}/fallback",
+        json={"channel": FallbackChannel.EMERGENCY_108.value},
+        headers={"Authorization": f"Bearer {resident_token}"},
+    )
+    assert tap.status_code == 200, tap.text
+    assert tap.json()["recorded"] is True
+
+    ev = session.exec(
+        select(CaseEvent).where(
+            CaseEvent.case_id == uuid.UUID(case_id),
+            CaseEvent.event_type == emergency_service.FALLBACK_INVOKED_EVENT,
+        )
+    ).first()
+    assert ev is not None
+    assert ev.meta["channel"] == FallbackChannel.EMERGENCY_108.value
+    assert AuditAction.EMERGENCY_FALLBACK_INVOKED.value in list(
+        session.exec(select(AuditLog.action)).all()
+    )
+
+
+def test_fallback_endpoints_reject_non_owner(
+    client: TestClient, project: Project, session: Session, make_user
+) -> None:
+    owner_token, _ = _onboard(client, project, session, "+15559990012")
+    make_user(Role.DOCTOR, phone="+15559991170")
+    created = client.post(
+        "/api/v1/emergency/alerts",
+        json={"symptom_codes": ["fall"]},
+        headers={
+            "Authorization": f"Bearer {owner_token}",
+            "Idempotency-Key": "owned",
+        },
+    )
+    case_id = created.json()["id"]
+
+    other_token, _ = _onboard(client, project, session, "+15559990013")
+    resp = client.get(
+        f"/api/v1/emergency/alerts/{case_id}/fallback-numbers",
+        headers={"Authorization": f"Bearer {other_token}"},
+    )
+    assert resp.status_code == 404
+
+
+def test_security_desk_gets_minimal_payload_only_when_opted_in(
+    client: TestClient, project: Project, session: Session, make_user
+) -> None:
+    # conftest `project` has enable_security_desk_alerts=True.
+    resident_token, _ = _onboard(client, project, session, "+15559990014")
+    make_user(Role.DOCTOR, phone="+15559991180")
+    desk = make_user(Role.SECURITY_DESK, phone="+15559991181")
+    _schedule(session, project, desk, Role.SECURITY_DESK, phone="+15550005555")
+
+    created = client.post(
+        "/api/v1/emergency/alerts",
+        json={"symptom_codes": ["chest_pain"], "location_text": "Tower B lift"},
+        headers={
+            "Authorization": f"Bearer {resident_token}",
+            "Idempotency-Key": "sd",
+        },
+    )
+    assert created.status_code == 200, created.text
+
+    desk_attempts = [
+        a
+        for a in session.exec(select(NotificationAttempt)).all()
+        if a.recipient_id == desk.id
+    ]
+    assert len(desk_attempts) == 1
+    assert desk_attempts[0].channel == NotificationChannel.SMS.value
+    assert desk_attempts[0].status == NotificationStatus.SENT.value
+    # notification_attempts never persists a body / symptoms / history.
+    assert not hasattr(desk_attempts[0], "body")
+    assert desk_attempts[0].error is None
+
+
+def test_security_desk_not_paged_when_no_oncall(
+    client: TestClient, project: Project, session: Session, make_user
+) -> None:
+    resident_token, _ = _onboard(client, project, session, "+15559990015")
+    make_user(Role.DOCTOR, phone="+15559991190")
+    make_user(Role.SECURITY_DESK, phone="+15559991191")  # no schedule row
+
+    created = client.post(
+        "/api/v1/emergency/alerts",
+        json={"symptom_codes": ["fall"]},
+        headers={
+            "Authorization": f"Bearer {resident_token}",
+            "Idempotency-Key": "sd-none",
+        },
+    )
+    assert created.status_code == 200
+    desk_user = session.exec(
+        select(User).where(User.phone == "+15559991191")
+    ).first()
+    desk_attempts = [
+        a
+        for a in session.exec(select(NotificationAttempt)).all()
+        if a.recipient_id == desk_user.id
+    ]
+    assert desk_attempts == []

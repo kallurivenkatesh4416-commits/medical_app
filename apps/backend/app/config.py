@@ -23,6 +23,25 @@ class Settings(BaseSettings):
     # Swappable provider gateways (see PLAN.md "Provider abstraction").
     provider_mode: str = "stub"
 
+    # --- Notification providers (Slice 6+; only needed when provider_mode=live) ---
+    twilio_account_sid: str | None = None
+    twilio_auth_token: str | None = None
+    twilio_sms_from: str | None = None
+    twilio_voice_from: str | None = None
+    fcm_service_account_file: str | None = None
+
+    # --- Emergency policy (technical defaults; ops decisions in open-questions) ---
+    # No server `acknowledged` within this window -> backup escalation + the
+    # mobile fallback action sheet. The countdown never cancels the retrying alert.
+    emergency_ack_timeout_seconds: int = 60
+    # The ONLY hardcoded fallback numbers (brief §2.2); everything else is
+    # resolved from project settings / the active on-call schedule.
+    national_emergency_numbers: str = "108,112"
+
+    @property
+    def national_emergency_number_list(self) -> list[str]:
+        return [n.strip() for n in self.national_emergency_numbers.split(",") if n.strip()]
+
     # --- Auth / JWT (short-lived access + refresh; RBAC) ---
     jwt_secret: str = "change-me-generate-a-long-random-string"
     jwt_algorithm: str = "HS256"

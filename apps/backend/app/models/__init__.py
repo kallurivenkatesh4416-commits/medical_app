@@ -12,6 +12,7 @@ from app.models.emergency_contact import EmergencyContact
 from app.models.idempotency import IdempotencyKey
 from app.models.medical_profile import MedicalProfile
 from app.models.medical_record import MedicalRecord
+from app.models.on_call import OnCallSchedule
 from app.models.project import Project
 from app.models.resident import Resident
 from app.models.user import User
@@ -29,6 +30,7 @@ __all__ = [
     "MedicalProfile",
     "MedicalRecord",
     "NotificationAttempt",
+    "OnCallSchedule",
     "Project",
     "Resident",
     "User",
