@@ -31,6 +31,7 @@ class MedEmergencyApp extends StatelessWidget {
     this.launcher = defaultLauncher,
     this.emergencyControllerBuilder,
     this.connectivity,
+    this.loginSubmit,
   });
 
   final UriLauncher launcher;
@@ -44,6 +45,14 @@ class MedEmergencyApp extends StatelessWidget {
   /// adapters (`connectivity_plus` or equivalent) plug into the same
   /// `ConnectivityWatcher` seam.
   final ConnectivityWatcher? connectivity;
+
+  /// Injected by widget tests so the **default** splash → login → home
+  /// path can be exercised end-to-end without hitting HTTP. When not
+  /// provided the LoginScreen renders the "Login is not wired in this
+  /// build." message (the real OTP wire-up is a Phase-2 task). Slice 11
+  /// review #1 makes this hook the only thing needed to land at the
+  /// HomeShell with the sticky disclaimer and Settings copy reachable.
+  final Future<bool> Function(String phone, String code)? loginSubmit;
 
   @override
   Widget build(BuildContext context) {
@@ -79,6 +88,7 @@ class MedEmergencyApp extends StatelessWidget {
         emergencyControllerBuilder:
             emergencyControllerBuilder ?? () => EmergencyApi().buildController(),
         connectivity: connectivity ?? InMemoryConnectivityWatcher(),
+        loginSubmit: loginSubmit,
       ),
     );
   }
@@ -95,6 +105,7 @@ class SplashScreen extends StatelessWidget {
     this.emergencyControllerBuilder,
     this.connectivity,
     this.onSignIn,
+    this.loginSubmit,
   });
 
   final UriLauncher launcher;
@@ -106,6 +117,11 @@ class SplashScreen extends StatelessWidget {
   /// the real login flow needing to be reachable through a Navigator
   /// stack. Production defaults to pushing the real [LoginScreen].
   final void Function(BuildContext context)? onSignIn;
+
+  /// Threaded through to [LoginScreen.onSubmit] so the end-to-end
+  /// splash → login → home path is exercisable without HTTP. Slice 11
+  /// review #1 — see [MedEmergencyApp.loginSubmit].
+  final Future<bool> Function(String phone, String code)? loginSubmit;
 
   void _openEmergency(BuildContext context) {
     final builder = emergencyControllerBuilder;
@@ -125,25 +141,28 @@ class SplashScreen extends StatelessWidget {
       onSignIn!(context);
       return;
     }
+    final effectiveConnectivity = connectivity ?? InMemoryConnectivityWatcher();
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => LoginScreen(
           launcher: launcher,
-          // Default route on a successful login is the [HomeShell] —
-          // host of the sticky `DISCLAIMER_SHORT` footer and offline
-          // banner per PLAN.md Slice 11. Widget tests typically inject
-          // their own `onSubmit` and don't rely on this default path.
-          onSubmit: (phone, code) async => false,
+          // Production: `loginSubmit` is the real OTP wire-up (still a
+          // Phase-2 task). Until that lands, leaving this null keeps the
+          // user-visible behaviour honest — the LoginScreen surfaces
+          // "Login is not wired in this build." rather than falsely
+          // claiming a successful sign-in.
+          onSubmit: loginSubmit,
+          onAuthenticated: (loginContext) {
+            Navigator.of(loginContext).pushReplacement(
+              MaterialPageRoute<void>(
+                builder: (_) => HomeShell(connectivity: effectiveConnectivity),
+              ),
+            );
+          },
         ),
       ),
     );
   }
-
-  /// Stub the default home route the app would push on a successful login.
-  /// Exposed for production wiring; widget tests target [LoginScreen]
-  /// directly and don't go through this path.
-  static Widget defaultHome(ConnectivityWatcher connectivity) =>
-      HomeShell(connectivity: connectivity);
 
   Future<void> _call108(BuildContext context) async {
     final messenger = ScaffoldMessenger.of(context);

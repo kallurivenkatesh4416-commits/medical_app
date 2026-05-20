@@ -273,4 +273,83 @@ void main() {
           reason: '56dp minimum tap target per brief §11 / PLAN.md Slice 11');
     });
   });
+
+  // ------------------------------------------------------------------------ //
+  // End-to-end default route — Slice 11 review #1 fix.                       //
+  // ------------------------------------------------------------------------ //
+
+  group('Default splash → Sign In → submit → HomeShell', () {
+    testWidgets(
+      'a successful login lands at HomeShell and Settings shows the canonical copy',
+      (tester) async {
+        String? capturedPhone;
+        String? capturedCode;
+        await tester.pumpWidget(MedEmergencyApp(
+          launcher: (_) async => true,
+          loginSubmit: (phone, code) async {
+            capturedPhone = phone;
+            capturedCode = code;
+            return true;
+          },
+        ));
+
+        // Splash → Sign In (the second tap of the ≤2-tap Call 108 path).
+        await tester.tap(find.widgetWithText(TextButton, 'Sign In'));
+        await tester.pumpAndSettle();
+
+        // LoginScreen renders with its own Call 108 button (the ≤2-tap
+        // claim from PLAN.md Slice 11 holds: splash → Sign In → Call 108).
+        expect(find.widgetWithText(FilledButton, 'Call 108'), findsOneWidget);
+
+        // Fill phone + code and submit.
+        await tester.enterText(find.byType(TextField).first, '+15550009999');
+        await tester.enterText(find.byType(TextField).last, '123456');
+        await tester.tap(find.widgetWithText(FilledButton, 'Verify code'));
+        await tester.pumpAndSettle();
+
+        // The injected loginSubmit captured the form values.
+        expect(capturedPhone, '+15550009999');
+        expect(capturedCode, '123456');
+
+        // HomeShell is now on top — its sticky DISCLAIMER_SHORT footer is
+        // the reachable proof.
+        expect(find.text(disclaimerShort), findsOneWidget);
+        // And the LoginScreen has been popped — no Verify code button on
+        // the home surface.
+        expect(find.widgetWithText(FilledButton, 'Verify code'), findsNothing);
+
+        // Tab into Settings → Connected devices to verify the canonical
+        // copy is reachable through the default navigation path (the
+        // gap the Slice 11 review #1 finding called out).
+        await tester.tap(find.text('Settings'));
+        await tester.pumpAndSettle();
+        expect(find.text(connectedDevicesPhase2), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'a failed login keeps the LoginScreen on top and never reaches HomeShell',
+      (tester) async {
+        await tester.pumpWidget(MedEmergencyApp(
+          launcher: (_) async => true,
+          loginSubmit: (_, __) async => false,
+        ));
+        await tester.tap(find.widgetWithText(TextButton, 'Sign In'));
+        await tester.pumpAndSettle();
+
+        await tester.enterText(find.byType(TextField).first, '+15550009998');
+        await tester.enterText(find.byType(TextField).last, '999999');
+        await tester.tap(find.widgetWithText(FilledButton, 'Verify code'));
+        await tester.pumpAndSettle();
+
+        // Error surfaced, Verify code button still on screen, no HomeShell.
+        expect(
+          find.text('Could not verify the code. Please try again.'),
+          findsOneWidget,
+        );
+        expect(find.widgetWithText(FilledButton, 'Verify code'), findsOneWidget);
+        expect(find.text(disclaimerShort), findsNothing);
+      },
+    );
+  });
 }

@@ -23,6 +23,7 @@ class LoginScreen extends StatefulWidget {
     super.key,
     this.launcher = defaultLauncher,
     this.onSubmit,
+    this.onAuthenticated,
   });
 
   final UriLauncher launcher;
@@ -31,6 +32,14 @@ class LoginScreen extends StatefulWidget {
   /// happy-path without hitting HTTP. Returns true on success. Production
   /// wiring is the real OTP API call — left as a Phase-2 task.
   final Future<bool> Function(String phone, String code)? onSubmit;
+
+  /// Called from inside the submit handler with the build context **after**
+  /// [onSubmit] returns true. The splash wires this to push the
+  /// `HomeShell` route (Slice 11 — the disclaimer-short footer and
+  /// offline banner only become reachable through this transition).
+  /// Without this callback the screen has no success path; the Slice 11
+  /// review #1 fix wires it.
+  final void Function(BuildContext context)? onAuthenticated;
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -85,6 +94,13 @@ class _LoginScreenState extends State<LoginScreen> {
       _busy = false;
       _error = ok ? null : tr('Could not verify the code. Please try again.');
     });
+    // Slice 11 review #1 fix: a successful login MUST hand off to the
+    // next route. Without this the HomeShell + sticky disclaimer + offline
+    // banner + Settings → Connected devices surfaces are only reachable
+    // through tests that pump HomeShell directly.
+    if (ok && widget.onAuthenticated != null) {
+      widget.onAuthenticated!(context);
+    }
   }
 
   @override
