@@ -770,6 +770,14 @@ export default function App() {
                 ))}
               </tbody>
             </table>
+            {/* Slice 11 polish: empty state on the adherence table so a
+                doctor reading a resident with no schedules sees a quiet
+                helpful sentence rather than an empty grid. */}
+            {adherenceResult.schedules.length === 0 ? (
+              <p style={styles.muted}>
+                No medicine schedules on file for this resident yet.
+              </p>
+            ) : null}
           </div>
         ) : null}
       </section>

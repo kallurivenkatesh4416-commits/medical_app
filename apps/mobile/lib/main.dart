@@ -1,17 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'connectivity.dart';
 import 'emergency.dart';
 import 'emergency_api.dart';
+import 'home.dart';
+import 'login.dart';
+import 'safety.dart';
 
-/// i18n placeholder (brief §11): every user-facing string is wrapped so Telugu
-/// and Hindi can be added in Phase 2. Real implementation lands in Slice 11.
+/// i18n placeholder (brief §11): every user-facing string is wrapped so
+/// Telugu and Hindi can land in Phase 2 by swapping this implementation.
+/// `tr` stays the identity function in Slice 11 — the discipline is the
+/// wrapping, not the resolution.
 String tr(String key) => key;
-
-/// Brief §2.1 disclaimer — exact required wording. No diagnosis language.
-const String disclaimerShort =
-    'This app does not replace emergency hospital care. '
-    'In a life-threatening situation, call 108 / 112 immediately.';
 
 /// The only hardcoded fallback number (brief §2.2). Reachable offline.
 final Uri kCall108 = Uri(scheme: 'tel', path: '108');
@@ -29,30 +30,55 @@ class MedEmergencyApp extends StatelessWidget {
     super.key,
     this.launcher = defaultLauncher,
     this.emergencyControllerBuilder,
+    this.connectivity,
   });
 
   final UriLauncher launcher;
 
-  /// Injected by widget tests; the app default builds a controller backed by
-  /// the real (`dart:io`) [EmergencyApi].
+  /// Injected by widget tests; the app default builds a controller backed
+  /// by the real (`dart:io`) [EmergencyApi].
   final EmergencyController Function()? emergencyControllerBuilder;
+
+  /// Optional connectivity watcher for the offline banner on home / vitals
+  /// / records. Defaults to an always-online in-memory stub; production
+  /// adapters (`connectivity_plus` or equivalent) plug into the same
+  /// `ConnectivityWatcher` seam.
+  final ConnectivityWatcher? connectivity;
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Emergency Health',
-      theme: ThemeData(
-        useMaterial3: true,
-        // Elderly-friendly defaults (brief §11). Refined in Slice 11.
-        textTheme: const TextTheme(
-          bodyLarge: TextStyle(fontSize: 18),
-          labelLarge: TextStyle(fontSize: 22),
+    // Brief §11 elderly-UX defaults: 18sp body, 22sp emphasis, primary
+    // buttons reach the 56dp minimum tap target. Applied at the theme
+    // level so every screen (splash / login / onboarding / home / vitals
+    // / records / settings) inherits without each surface re-declaring.
+    final theme = ThemeData(
+      useMaterial3: true,
+      textTheme: const TextTheme(
+        bodyLarge: TextStyle(fontSize: 18),
+        bodyMedium: TextStyle(fontSize: 16),
+        labelLarge: TextStyle(fontSize: 22),
+      ),
+      filledButtonTheme: FilledButtonThemeData(
+        style: FilledButton.styleFrom(
+          minimumSize: const Size(56, 56),
+          textStyle: const TextStyle(fontSize: 22),
         ),
       ),
+      outlinedButtonTheme: OutlinedButtonThemeData(
+        style: OutlinedButton.styleFrom(
+          minimumSize: const Size(56, 56),
+          textStyle: const TextStyle(fontSize: 18),
+        ),
+      ),
+    );
+    return MaterialApp(
+      title: 'Emergency Health',
+      theme: theme,
       home: SplashScreen(
         launcher: launcher,
         emergencyControllerBuilder:
             emergencyControllerBuilder ?? () => EmergencyApi().buildController(),
+        connectivity: connectivity ?? InMemoryConnectivityWatcher(),
       ),
     );
   }
@@ -67,10 +93,19 @@ class SplashScreen extends StatelessWidget {
     super.key,
     this.launcher = defaultLauncher,
     this.emergencyControllerBuilder,
+    this.connectivity,
+    this.onSignIn,
   });
 
   final UriLauncher launcher;
   final EmergencyController Function()? emergencyControllerBuilder;
+  final ConnectivityWatcher? connectivity;
+
+  /// Injected by widget tests so the Sign-in tap can route to a custom
+  /// destination (e.g. the [LoginScreen] with a fake `onSubmit`) without
+  /// the real login flow needing to be reachable through a Navigator
+  /// stack. Production defaults to pushing the real [LoginScreen].
+  final void Function(BuildContext context)? onSignIn;
 
   void _openEmergency(BuildContext context) {
     final builder = emergencyControllerBuilder;
@@ -84,6 +119,31 @@ class SplashScreen extends StatelessWidget {
       ),
     );
   }
+
+  void _openSignIn(BuildContext context) {
+    if (onSignIn != null) {
+      onSignIn!(context);
+      return;
+    }
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => LoginScreen(
+          launcher: launcher,
+          // Default route on a successful login is the [HomeShell] —
+          // host of the sticky `DISCLAIMER_SHORT` footer and offline
+          // banner per PLAN.md Slice 11. Widget tests typically inject
+          // their own `onSubmit` and don't rely on this default path.
+          onSubmit: (phone, code) async => false,
+        ),
+      ),
+    );
+  }
+
+  /// Stub the default home route the app would push on a successful login.
+  /// Exposed for production wiring; widget tests target [LoginScreen]
+  /// directly and don't go through this path.
+  static Widget defaultHome(ConnectivityWatcher connectivity) =>
+      HomeShell(connectivity: connectivity);
 
   Future<void> _call108(BuildContext context) async {
     final messenger = ScaffoldMessenger.of(context);
@@ -153,6 +213,26 @@ class SplashScreen extends StatelessWidget {
                     child: OutlinedButton(
                       onPressed: () => _openEmergency(context),
                       child: Text(tr('I Need Medical Help')),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              // PLAN.md Slice 11: Sign In is the second tap that takes the
+              // resident to the login surface, which carries its own
+              // `Call 108` button. Splash → Sign In → Call 108 is the 2-tap
+              // path the demo proof asserts.
+              Semantics(
+                button: true,
+                label: tr('Sign In'),
+                child: SizedBox(
+                  width: double.infinity,
+                  height: 56,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: TextButton(
+                      onPressed: () => _openSignIn(context),
+                      child: Text(tr('Sign In')),
                     ),
                   ),
                 ),

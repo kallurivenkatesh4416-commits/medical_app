@@ -94,11 +94,18 @@ def test_onboarding_creates_resident_and_consents(
         ConsentType.FAMILY_MEMBER_ACCESS.value
     ] is False
 
-    actions = set(session.exec(select(AuditLog.action)).all())
-    assert AuditAction.RESIDENT_REGISTERED.value in actions
-    assert AuditAction.DISCLAIMER_ACKNOWLEDGED.value in actions
-    assert AuditAction.CONSENT_GRANTED.value in actions
-    assert AuditAction.CONSENT_REVOKED.value in actions  # the declined one
+    actions = list(session.exec(select(AuditLog.action)).all())
+    actions_set = set(actions)
+    assert AuditAction.RESIDENT_REGISTERED.value in actions_set
+    assert AuditAction.DISCLAIMER_ACKNOWLEDGED.value in actions_set
+    assert AuditAction.CONSENT_GRANTED.value in actions_set
+    assert AuditAction.CONSENT_REVOKED.value in actions_set  # the declined one
+    # Slice 11 contract: the disclaimer ack screen is the single bottleneck
+    # before consents/profile are persisted — the audit row must land
+    # exactly once per successful onboarding, never zero (a buried checkbox
+    # bypass) and never twice (the onboarding-idempotency replay path
+    # short-circuits before re-auditing).
+    assert actions.count(AuditAction.DISCLAIMER_ACKNOWLEDGED.value) == 1
 
 
 @pytest.mark.parametrize(
@@ -264,6 +271,12 @@ def test_onboarding_is_idempotent_with_key(
         select(Resident).where(Resident.user_id == users[0].id)
     ).all()
     assert len(residents) == 1
+    # Slice 11 contract: the lost-response retry must NOT re-audit the
+    # disclaimer ack — exactly one row across both calls, matching the
+    # "exactly one per successful onboarding" invariant from
+    # `test_onboarding_creates_resident_and_consents`.
+    actions = list(session.exec(select(AuditLog.action)).all())
+    assert actions.count(AuditAction.DISCLAIMER_ACKNOWLEDGED.value) == 1
 
 
 def test_idempotency_key_is_owner_bound(
