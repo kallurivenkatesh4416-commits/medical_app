@@ -43,6 +43,7 @@ from app.enums import (
     Role,
 )
 from app.models.base import utcnow
+from app.models.consent import Consent
 from app.models.medicine import MedicineDoseLog, MedicineSchedule
 from app.models.resident import Resident
 from app.models.user import User
@@ -142,10 +143,23 @@ def deactivate_schedule(
     actor: User,
     schedule_id: uuid.UUID,
     from_ip: str | None,
+    expected_resident_id: uuid.UUID | None = None,
 ) -> dict:
     """Mark a schedule inactive (the mobile app cancels its local
-    notifications on next sync). Doctor or the resident themselves."""
+    notifications on next sync). Doctor or the resident themselves.
+
+    ``expected_resident_id`` is the API path's ``{resident_id}`` segment.
+    When supplied (staff route), the schedule's ``resident_id`` MUST match
+    — otherwise a doctor in the same project could deactivate resident
+    A's schedule through resident B's URL. 404 (no existence leak)
+    rather than 403 keeps the response shape consistent with the rest of
+    the resident-scoped staff API."""
     schedule = _schedule_for_actor(session, actor=actor, schedule_id=schedule_id)
+    if (
+        expected_resident_id is not None
+        and schedule.resident_id != expected_resident_id
+    ):
+        raise AuthError(404, "schedule_not_found", "Unknown medicine schedule.")
     if schedule.active:
         schedule.active = False
         session.add(schedule)
@@ -174,8 +188,16 @@ def deactivate_schedule(
 def list_own_schedules(
     session: Session, *, user: User, from_ip: str | None
 ) -> list[dict]:
+    """Resident's own schedule list — drives the mobile reminder sync.
+
+    Reads ``MEDICINE_REMINDER_NOTIFICATIONS`` live. When the consent is
+    revoked we return an **empty list** so the device-local
+    ``LocalReminderScheduler.syncFromSchedules`` cancels every reminder on
+    the next refresh. The DB rows are not deleted — re-granting consent
+    brings them back into view, preserving the resident's intent and the
+    historical dose-log audit trail (per DPDP §8: minimum-necessary
+    storage that the resident can still reactivate)."""
     resident = get_resident_for_user(session, user)
-    rows = _active_or_recent(session, resident_id=resident.id)
     record_audit(
         session,
         action=AuditAction.MEDICINE_SCHEDULE_LIST,
@@ -185,6 +207,11 @@ def list_own_schedules(
         from_ip=from_ip,
         purpose="medicine.list_own",
     )
+    if not _has_consent(
+        session, resident_id=resident.id, consent=ConsentType.MEDICINE_REMINDER_NOTIFICATIONS
+    ):
+        return []
+    rows = _active_or_recent(session, resident_id=resident.id)
     return [serialize_schedule(s) for s in rows]
 
 
@@ -266,6 +293,18 @@ def log_own_dose(
     if not schedule.active:
         raise AuthError(
             409, "schedule_inactive", "Schedule is inactive; new doses cannot be logged."
+        )
+    # Slot integrity: only real schedule slots may be logged, so adherence
+    # counts (`taken` + `skipped` over `scheduled_slots`) cannot exceed 100%
+    # and the mobile app cannot poison the doctor's view by submitting an
+    # off-clock timestamp. AS_NEEDED skips this check by design — PRN
+    # medicines record actual intake times, not scheduled slots, and never
+    # contribute to `missed`.
+    if not _is_valid_dose_slot(schedule, data.scheduled_for):
+        raise AuthError(
+            422,
+            "invalid_dose_slot",
+            "scheduled_for must match one of this schedule's time-of-day slots on a valid date.",
         )
 
     # Pre-check: a duplicate retry on the same slot must return the
@@ -483,6 +522,16 @@ def _validate_schedule(data: ScheduleInput) -> None:
     expected = _FREQUENCY_SLOT_COUNTS.get(data.frequency.value)
     if expected is None:
         raise AuthError(422, "invalid_frequency", "Unknown medicine frequency.")
+    # AS_NEEDED (PRN) explicitly has no fixed slots; passing any would
+    # cause the mobile reminder scheduler to register fixed-time
+    # notifications for a medicine that's supposed to be taken only on
+    # need. Reject so the contract stays honest end-to-end.
+    if expected == 0 and data.times_of_day:
+        raise AuthError(
+            422,
+            "as_needed_no_slots",
+            f"{data.frequency.value} schedules must not declare time-of-day slots.",
+        )
     if expected > 0 and len(data.times_of_day) != expected:
         raise AuthError(
             422,
@@ -496,6 +545,16 @@ def _validate_schedule(data: ScheduleInput) -> None:
                 "invalid_time_of_day",
                 "times_of_day entries must be 'HH:MM' (24-hour).",
             )
+    # Duplicate slots would register the same local reminder twice on the
+    # mobile device — the resident would get a double notification and a
+    # double dose-log row (different `scheduled_for` second-level
+    # timestamps, but conceptually the same slot).
+    if len(set(data.times_of_day)) != len(data.times_of_day):
+        raise AuthError(
+            422,
+            "duplicate_time_of_day",
+            "times_of_day must not contain duplicate slots.",
+        )
 
 
 def _is_hhmm(value: str) -> bool:
@@ -504,6 +563,21 @@ def _is_hhmm(value: str) -> bool:
         return 0 <= int(hour) <= 23 and 0 <= int(minute) <= 59
     except (ValueError, AttributeError):
         return False
+
+
+def _has_consent(
+    session: Session, *, resident_id: uuid.UUID, consent: ConsentType
+) -> bool:
+    """Non-raising read of live consent state. Used where the right answer
+    on revocation is a filtered/empty response (the resident's own
+    medicine list when reminders are paused) rather than a 403."""
+    row = session.exec(
+        select(Consent).where(
+            Consent.resident_id == resident_id,
+            Consent.consent_type == consent.value,
+        )
+    ).first()
+    return row is not None and row.granted
 
 
 def _resident_for_actor(
@@ -576,6 +650,35 @@ def _active_or_recent(
     return [
         r for r in rows if r.active or (r.updated_at and r.updated_at >= cutoff)
     ]
+
+
+def _is_valid_dose_slot(schedule: MedicineSchedule, when: datetime) -> bool:
+    """Return True iff ``when`` is a real slot for ``schedule``:
+
+    - ``AS_NEEDED`` (PRN) accepts any timestamp inside the schedule's
+      validity window — there are no fixed clock slots, so the resident
+      records the actual intake time.
+    - All other frequencies require ``when.strftime('%H:%M')`` to be one
+      of the schedule's ``times_of_day`` AND, for ``WEEKLY``, the same
+      weekday as the schedule's start_date.
+    - The date must lie between ``start_date`` and ``end_date`` (when set).
+
+    The slot equality is exact (no skew tolerance) because the mobile app
+    constructs ``scheduled_for`` from the schedule's own ``times_of_day``
+    — any off-clock value indicates either a buggy client or tampering."""
+    when_date = when.date()
+    if when_date < schedule.start_date:
+        return False
+    if schedule.end_date is not None and when_date > schedule.end_date:
+        return False
+    if schedule.frequency == MedicineFrequency.AS_NEEDED.value:
+        return True
+    slot_str = when.strftime("%H:%M")
+    if slot_str not in (schedule.times_of_day or []):
+        return False
+    if schedule.frequency == MedicineFrequency.WEEKLY.value:
+        return when_date.weekday() == schedule.start_date.weekday()
+    return True
 
 
 def _expand_slots(

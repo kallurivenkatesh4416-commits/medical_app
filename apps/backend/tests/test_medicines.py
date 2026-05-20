@@ -322,7 +322,11 @@ def test_resident_logs_taken_and_duplicate_log_returns_same_row(
         headers=headers,
     ).json()
 
-    slot = (utcnow() - timedelta(minutes=10)).isoformat()
+    # Use the schedule's real "08:00" slot on today's date so the new
+    # slot-integrity check accepts the timestamp (a random utcnow() value
+    # would be rejected by `invalid_dose_slot`).
+    slot_dt = datetime.combine(date.today(), datetime.min.time()).replace(hour=8)
+    slot = slot_dt.isoformat()
     first = client.post(
         "/api/v1/me/medicines/doses",
         json={
@@ -575,3 +579,211 @@ def test_handover_section_6_keeps_placeholder_with_no_active_schedules(
     text = "\n".join(p.extract_text() for p in PdfReader(BytesIO(pdf_resp.content)).pages)
     assert "Current Medicines" in text
     assert "No current medicines on file" in text
+
+
+# --------------------------------------------------------------------------- #
+# 6. Review fixes — regression tests for the four Slice 9 review findings    #
+# --------------------------------------------------------------------------- #
+
+
+def test_reminder_consent_revocation_empties_resident_schedule_list(
+    client: TestClient, project: Project, session: Session
+) -> None:
+    """Review #1: a revoked MEDICINE_REMINDER_NOTIFICATIONS consent must
+    take the resident's reminder list to empty on the very next read, so
+    the mobile `LocalReminderScheduler.syncFromSchedules([])` cancels
+    every device-local reminder. The schedule row stays in the DB so a
+    later re-grant restores the view without losing dose history."""
+    resident_token, _, _ = _onboard(client, project, session, "+15559990600")
+    headers = {"Authorization": f"Bearer {resident_token}"}
+    created = client.post(
+        "/api/v1/me/medicines/schedules",
+        json=_schedule_body(),
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    # Sanity: the schedule is visible before revocation.
+    before = client.get("/api/v1/me/medicines/schedules", headers=headers)
+    assert before.status_code == 200
+    assert len(before.json()) == 1
+
+    revoke = client.patch(
+        "/api/v1/me/consents/medicine_reminder_notifications",
+        json={"granted": False},
+        headers=headers,
+    )
+    assert revoke.status_code == 200, revoke.text
+
+    after = client.get("/api/v1/me/medicines/schedules", headers=headers)
+    assert after.status_code == 200
+    assert after.json() == []
+    # The row is still present in the DB; re-granting brings it back.
+    assert len(session.exec(select(MedicineSchedule)).all()) == 1
+
+    regrant = client.patch(
+        "/api/v1/me/consents/medicine_reminder_notifications",
+        json={"granted": True},
+        headers=headers,
+    )
+    assert regrant.status_code == 200, regrant.text
+    restored = client.get("/api/v1/me/medicines/schedules", headers=headers)
+    assert len(restored.json()) == 1
+
+
+def test_dose_log_rejects_off_slot_timestamp(
+    client: TestClient, project: Project, session: Session
+) -> None:
+    """Review #2: logging a dose at a time that is not one of the
+    schedule's `times_of_day` would let the resident inflate `taken`
+    above `scheduled_slots` and poison adherence. The service rejects
+    those with 422 `invalid_dose_slot`."""
+    resident_token, _, _ = _onboard(client, project, session, "+15559990601")
+    headers = {"Authorization": f"Bearer {resident_token}"}
+    created = client.post(
+        "/api/v1/me/medicines/schedules",
+        json=_schedule_body(),  # once_daily at 08:00
+        headers=headers,
+    )
+    sched_id = created.json()["id"]
+
+    off_slot = datetime.combine(date.today(), datetime.min.time()).replace(hour=12, minute=34)
+    resp = client.post(
+        "/api/v1/me/medicines/doses",
+        json={
+            "schedule_id": sched_id,
+            "scheduled_for": off_slot.isoformat(),
+            "status": MedicineDoseStatus.TAKEN.value,
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "invalid_dose_slot"
+    assert session.exec(select(MedicineDoseLog)).all() == []
+
+    # Same date, the real "08:00" slot — accepted.
+    on_slot = off_slot.replace(hour=8, minute=0)
+    ok = client.post(
+        "/api/v1/me/medicines/doses",
+        json={
+            "schedule_id": sched_id,
+            "scheduled_for": on_slot.isoformat(),
+            "status": MedicineDoseStatus.TAKEN.value,
+        },
+        headers=headers,
+    )
+    assert ok.status_code == 200, ok.text
+
+
+def test_dose_log_accepts_any_time_for_as_needed_schedule(
+    client: TestClient, project: Project, session: Session
+) -> None:
+    """AS_NEEDED (PRN) medicines have no fixed slots — the resident
+    records the actual intake time. The slot check must let any
+    timestamp through, and `as_needed` schedules never contribute to
+    `missed` (covered by the existing adherence test)."""
+    resident_token, _, _ = _onboard(client, project, session, "+15559990602")
+    headers = {"Authorization": f"Bearer {resident_token}"}
+    created = client.post(
+        "/api/v1/me/medicines/schedules",
+        json=_schedule_body(
+            name="Salbutamol inhaler",
+            dose="2 puffs",
+            frequency=MedicineFrequency.AS_NEEDED.value,
+            times_of_day=[],
+        ),
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    sched_id = created.json()["id"]
+
+    when = utcnow() - timedelta(minutes=42)
+    resp = client.post(
+        "/api/v1/me/medicines/doses",
+        json={
+            "schedule_id": sched_id,
+            "scheduled_for": when.isoformat(),
+            "status": MedicineDoseStatus.TAKEN.value,
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def test_staff_deactivate_via_wrong_resident_path_returns_404(
+    client: TestClient, project: Project, session: Session, login
+) -> None:
+    """Review #3: the staff deactivate route must verify that the
+    schedule's owner matches the path's `{resident_id}`. Without it, a
+    doctor in the same project could deactivate resident A's schedule
+    via resident B's URL."""
+    _, resident_a, _ = _onboard(client, project, session, "+15559990610")
+    _, resident_b, _ = _onboard(client, project, session, "+15559990611")
+    doctor = _make_user(session, project, Role.DOCTOR)
+
+    schedule = client.post(
+        f"/api/v1/residents/{resident_a.id}/medicines/schedules",
+        json=_schedule_body(),
+        headers=_auth(client, login, doctor),
+    ).json()
+
+    wrong = client.post(
+        f"/api/v1/residents/{resident_b.id}/medicines/schedules/{schedule['id']}/deactivate",
+        headers=_auth(client, login, doctor),
+    )
+    assert wrong.status_code == 404
+    assert wrong.json()["error"]["code"] == "schedule_not_found"
+
+    # The schedule is still active.
+    row = session.exec(
+        select(MedicineSchedule).where(MedicineSchedule.id == uuid.UUID(schedule["id"]))
+    ).first()
+    assert row is not None
+    assert row.active is True
+
+    # And the correct path still works.
+    right = client.post(
+        f"/api/v1/residents/{resident_a.id}/medicines/schedules/{schedule['id']}/deactivate",
+        headers=_auth(client, login, doctor),
+    )
+    assert right.status_code == 200
+    assert right.json()["active"] is False
+
+
+def test_schedule_rejects_duplicate_slots(
+    client: TestClient, project: Project, session: Session
+) -> None:
+    """Review #4 (a): two identical `times_of_day` values would register
+    the same local reminder twice on the device. The service rejects
+    duplicates with 422 `duplicate_time_of_day`."""
+    resident_token, _, _ = _onboard(client, project, session, "+15559990620")
+    headers = {"Authorization": f"Bearer {resident_token}"}
+    resp = client.post(
+        "/api/v1/me/medicines/schedules",
+        json=_schedule_body(
+            frequency=MedicineFrequency.TWICE_DAILY.value,
+            times_of_day=["08:00", "08:00"],
+        ),
+        headers=headers,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "duplicate_time_of_day"
+
+
+def test_schedule_rejects_as_needed_with_fixed_times_of_day(
+    client: TestClient, project: Project, session: Session
+) -> None:
+    """Review #4 (b): `as_needed` (PRN) is informational — declaring
+    fixed slots would create local notifications for a medicine that is
+    only taken on need. Rejected with 422 `as_needed_no_slots`."""
+    resident_token, _, _ = _onboard(client, project, session, "+15559990621")
+    headers = {"Authorization": f"Bearer {resident_token}"}
+    resp = client.post(
+        "/api/v1/me/medicines/schedules",
+        json=_schedule_body(
+            frequency=MedicineFrequency.AS_NEEDED.value,
+            times_of_day=["08:00"],
+        ),
+        headers=headers,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "as_needed_no_slots"

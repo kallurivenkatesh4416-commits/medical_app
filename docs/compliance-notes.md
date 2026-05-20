@@ -284,6 +284,34 @@
   `EMERGENCY_SHARE_WITH_HOSPITAL` gate Slice 8 introduced still controls
   whether the handover (and thus the medicine list) leaves the platform.
 
+### Slice 9 review fixes
+
+- **Reminder revocation actually stops reminders.** `GET /me/medicines/
+  schedules` reads `MEDICINE_REMINDER_NOTIFICATIONS` live and returns an
+  empty list when revoked; the mobile `LocalReminderScheduler.
+  syncFromSchedules([])` then cancels every device-local reminder on the
+  next refresh. The DB rows are preserved so re-granting consent restores
+  the view without losing the resident's prescription record or dose
+  history. The staff list endpoint is intentionally unaffected — a doctor
+  must still see what was prescribed even when the resident has paused
+  reminders.
+- **Dose-log slot integrity.** `log_own_dose` validates that
+  `scheduled_for` is a real slot for the schedule — `HH:MM` matches one
+  of `times_of_day`, the date lies inside `start_date`..`end_date`, and
+  WEEKLY also matches the weekday. Without this, a resident could
+  submit `12:34` against an `08:00` schedule and inflate `taken` above
+  `scheduled_slots` in the doctor's adherence view. `as_needed` (PRN)
+  skips the slot check by design — there are no fixed clock slots.
+- **Staff deactivate is owner-checked.** The staff route's path
+  `{resident_id}` is now compared against the schedule's owner; a
+  mismatch is 404 (no existence leak), so a doctor cannot deactivate
+  resident A's schedule by routing through resident B's URL.
+- **Schedule validation is tighter.** Duplicate `times_of_day` slots are
+  rejected (`duplicate_time_of_day`) so the mobile device never gets two
+  reminders for the same slot. `as_needed` schedules are rejected if
+  they declare any `times_of_day` (`as_needed_no_slots`) so the PRN
+  contract stays honest end-to-end.
+
 ## Open questions — `[NEEDS_LEGAL_REVIEW]`
 
 1. `[NEEDS_LEGAL_REVIEW]` DPDP cross-border data: acceptable AWS S3 region for

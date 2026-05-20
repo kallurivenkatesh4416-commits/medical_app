@@ -247,11 +247,16 @@ def deactivate_resident_schedule(
     actor: User = Depends(doctor_only),
     session: Session = Depends(get_db),
 ) -> dict:
-    # resident_id is in the URL for routing/audit clarity; the service
-    # validates that the schedule belongs to a resident in the actor's
-    # project. We don't trust the path resident_id over the schedule row.
+    # The path's `resident_id` MUST match the schedule's owner — without
+    # this, a doctor could deactivate resident A's schedule via resident
+    # B's URL as long as both are in the same project. The service raises
+    # 404 (no existence leak) on mismatch.
     return medicines_service.deactivate_schedule(
-        session, actor=actor, schedule_id=schedule_id, from_ip=client_ip(request)
+        session,
+        actor=actor,
+        schedule_id=schedule_id,
+        expected_resident_id=resident_id,
+        from_ip=client_ip(request),
     )
 
 
