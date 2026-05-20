@@ -523,3 +523,260 @@ def test_staff_can_refresh_signed_link(
     assert "/api/v1/handover/file/" in resp.json()["url"]
     actions = [row.action for row in session.exec(select(AuditLog)).all()]
     assert AuditAction.HANDOVER_LINK_ISSUED.value in actions
+
+
+# --------------------------------------------------------------------------- #
+# 7. Review fix #1 — EMERGENCY_SHARE_WITH_HOSPITAL consent gates the surface  #
+# --------------------------------------------------------------------------- #
+
+
+def _revoke_hospital_consent(
+    client: TestClient, resident_token: str, *, granted: bool
+) -> None:
+    resp = client.patch(
+        "/api/v1/me/consents/emergency_share_with_hospital",
+        json={"granted": granted},
+        headers={"Authorization": f"Bearer {resident_token}"},
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def test_generate_blocked_when_hospital_consent_revoked(
+    client: TestClient, project: Project, session: Session, login
+) -> None:
+    """A resident who revoked EMERGENCY_SHARE_WITH_HOSPITAL must not have a
+    handover PDF rendered or stored — assert_consent reads live state so the
+    revocation is honoured on the next request."""
+    resident_token, _ = _onboard(client, project, session, "+15559990300")
+    doctor = _make_doctor(session, project)
+    case_id = _create_alert(client, resident_token, key="handover-consent-gen")
+    _revoke_hospital_consent(client, resident_token, granted=False)
+
+    resp = client.post(
+        f"/api/v1/emergency/alerts/{case_id}/handover",
+        json={
+            "hospital_destination": "Apollo",
+            "doctor_registration_number": "MCI-1",
+        },
+        headers=_auth(client, login, doctor),
+    )
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "consent_required"
+    # PHI never reached storage and no row was persisted.
+    rows = session.exec(select(HandoverPdf)).all()
+    assert rows == []
+
+
+def test_dispatch_and_link_blocked_when_hospital_consent_revoked_after_generate(
+    client: TestClient, project: Project, session: Session, login
+) -> None:
+    """If the resident revokes hospital sharing AFTER a PDF was generated,
+    the persisted row stays for retention but no new signed link is minted
+    and no dispatch can leave the platform."""
+    resident_token, _ = _onboard(client, project, session, "+15559990301")
+    doctor = _make_doctor(session, project)
+    case_id = _create_alert(client, resident_token, key="handover-consent-disp")
+    gen = client.post(
+        f"/api/v1/emergency/alerts/{case_id}/handover",
+        json={
+            "hospital_destination": "Apollo",
+            "doctor_registration_number": "MCI-1",
+        },
+        headers=_auth(client, login, doctor),
+    )
+    assert gen.status_code == 200, gen.text
+    handover_id = gen.json()["id"]
+
+    _revoke_hospital_consent(client, resident_token, granted=False)
+
+    # Link refresh blocked
+    link = client.get(
+        f"/api/v1/handover/{handover_id}/link",
+        headers=_auth(client, login, doctor),
+    )
+    assert link.status_code == 403
+    assert link.json()["error"]["code"] == "consent_required"
+
+    # Dispatch blocked
+    disp = client.post(
+        f"/api/v1/handover/{handover_id}/dispatch",
+        json={"email": "er@apollo.example"},
+        headers=_auth(client, login, doctor),
+    )
+    assert disp.status_code == 403
+    assert disp.json()["error"]["code"] == "consent_required"
+    # And nothing left the platform: no dispatch rows, no stub captures.
+    assert session.exec(select(HandoverDispatch)).all() == []
+    assert StubEmailGateway.sent == []
+
+
+# --------------------------------------------------------------------------- #
+# 8. Review fix #2 — in live mode the signed URL is the S3 native presigned  #
+# --------------------------------------------------------------------------- #
+
+
+def test_live_mode_signed_url_uses_storage_gateway_not_backend_proxy(
+    monkeypatch,
+) -> None:
+    """``S3StorageGateway.get_bytes`` raises by design — live mode MUST use
+    the native S3 presigned URL the gateway returns, not the backend-proxy
+    `/handover/file/{token}` route (which would always 404 in live mode)."""
+    from app.services import handover_service
+    from app.services.handover_service import _signed_url
+
+    class _FakeSettings:
+        provider_mode = "live"
+        public_base_url = "http://localhost:8000"
+        s3_signed_url_ttl_seconds = 900
+
+    class _FakeGateway:
+        captured: dict = {}
+
+        def signed_url(self, *, key: str, download_name: str) -> str:
+            _FakeGateway.captured = {"key": key, "download_name": download_name}
+            return f"https://example.s3.amazonaws.com/{key}?X-Amz-Signature=sig"
+
+    monkeypatch.setattr(handover_service, "get_settings", lambda: _FakeSettings())
+    monkeypatch.setattr(handover_service, "get_storage_gateway", _FakeGateway)
+
+    handover = HandoverPdf(
+        project_id=uuid.uuid4(),
+        case_id=uuid.uuid4(),
+        generated_by=uuid.uuid4(),
+        storage_key="abc123",
+        file_name="handover-x.pdf",
+        size_bytes=1024,
+        doctor_name="Dr X",
+        doctor_registration_number="MCI-1",
+        hospital_destination="Apollo",
+    )
+
+    url = _signed_url(handover)
+    assert url.startswith("https://example.s3.amazonaws.com/abc123")
+    # The backend-proxy route is the stub-only path; live mode must NOT use it.
+    assert "/api/v1/handover/file/" not in url
+    assert _FakeGateway.captured == {"key": "abc123", "download_name": "handover-x.pdf"}
+
+
+# --------------------------------------------------------------------------- #
+# 9. Review fix #3 — live Twilio gateway routes WhatsApp to Messages.json     #
+# --------------------------------------------------------------------------- #
+
+
+def test_live_twilio_whatsapp_posts_messages_endpoint_with_whatsapp_prefix(
+    monkeypatch,
+) -> None:
+    """The live Twilio gateway must hit `Messages.json` with the Twilio
+    `whatsapp:` prefix on BOTH endpoints; callers pass a normal phone
+    number. Until this lands, dispatch in live mode is always FAILED."""
+    from app.services import notifications
+
+    class _FakeSettings:
+        provider_mode = "live"
+        twilio_account_sid = "ACtest"
+        twilio_auth_token = "secret"
+        twilio_sms_from = "+15550000000"
+        twilio_voice_from = "+15550000001"
+        twilio_whatsapp_from = "whatsapp:+14155238886"
+
+    monkeypatch.setattr(notifications, "get_settings", lambda: _FakeSettings())
+
+    captured: dict = {}
+
+    class _FakeResp:
+        status_code = 201
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"sid": "SMfake"}
+
+    def _fake_post(url, **kwargs):  # noqa: ANN001
+        captured["url"] = url
+        captured["data"] = kwargs.get("data")
+        captured["auth"] = kwargs.get("auth")
+        return _FakeResp()
+
+    monkeypatch.setattr(notifications.requests, "post", _fake_post)
+
+    gateway = notifications.get_notification_gateway()
+    sid = gateway.send_whatsapp(to="+15557779000", body="link")
+
+    assert sid == "SMfake"
+    assert captured["url"].endswith("/Accounts/ACtest/Messages.json")
+    assert captured["data"]["From"] == "whatsapp:+14155238886"
+    assert captured["data"]["To"] == "whatsapp:+15557779000"
+    assert captured["data"]["Body"] == "link"
+
+
+def test_live_twilio_gateway_requires_credentials(monkeypatch) -> None:
+    """Misconfigured live mode must fail loudly at construction, not silently
+    record every dispatch as failed."""
+    from app.services import notifications
+
+    class _NoKeys:
+        provider_mode = "live"
+        twilio_account_sid = None
+        twilio_auth_token = None
+        twilio_sms_from = None
+        twilio_voice_from = None
+        twilio_whatsapp_from = None
+
+    monkeypatch.setattr(notifications, "get_settings", lambda: _NoKeys())
+    with pytest.raises(RuntimeError, match="TWILIO_ACCOUNT_SID"):
+        notifications.get_notification_gateway()
+
+
+# --------------------------------------------------------------------------- #
+# 10. Review fix #4 — dispatch rows are durable across a mid-send crash      #
+# --------------------------------------------------------------------------- #
+
+
+def test_dispatch_row_is_durable_even_if_process_crashes_mid_send(
+    client: TestClient, project: Project, session: Session, monkeypatch, login
+) -> None:
+    """Before the fix, ``_dispatch_one`` only flushed before calling the
+    provider and committed at the end; a process crash after a successful
+    provider call would lose the audit/dispatch row. The outbox now commits
+    the row in SENDING before the provider call, so a `BaseException` that
+    bypasses our `except Exception` still leaves a durable row in the DB."""
+    resident_token, _ = _onboard(client, project, session, "+15559990400")
+    doctor = _make_doctor(session, project)
+    case_id = _create_alert(client, resident_token, key="handover-durable")
+    gen = client.post(
+        f"/api/v1/emergency/alerts/{case_id}/handover",
+        json={
+            "hospital_destination": "Apollo",
+            "doctor_registration_number": "MCI-1",
+        },
+        headers=_auth(client, login, doctor),
+    )
+    handover_id = gen.json()["id"]
+
+    def _crash(self, **kwargs):  # noqa: ANN001
+        # BaseException sidesteps `except Exception` in _dispatch_one,
+        # simulating a hard process crash (SystemExit / KeyboardInterrupt /
+        # OOM-killer SIGKILL) after the row has been committed in SENDING.
+        raise SystemExit("simulated mid-send crash")
+
+    monkeypatch.setattr(StubEmailGateway, "send", _crash)
+
+    with pytest.raises(SystemExit):
+        client.post(
+            f"/api/v1/handover/{handover_id}/dispatch",
+            json={"email": "er@apollo.example"},
+            headers=_auth(client, login, doctor),
+        )
+
+    # The dispatch row exists despite the crash, in SENDING — stuck-claim
+    # state, recoverable by a reaper (open-questions.md).
+    rows = session.exec(
+        select(HandoverDispatch).where(
+            HandoverDispatch.handover_id == uuid.UUID(handover_id)
+        )
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].channel == "email"
+    assert rows[0].status == NotificationStatus.SENDING.value
+    assert rows[0].error is None

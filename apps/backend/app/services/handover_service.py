@@ -21,6 +21,7 @@ from io import BytesIO
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+from sqlalchemy import update
 from sqlmodel import Session, select
 from xhtml2pdf import pisa
 
@@ -28,6 +29,7 @@ from app.config import get_settings
 from app.enums import (
     AuditAction,
     CaseNoteType,
+    ConsentType,
     HandoverDispatchChannel,
     NotificationStatus,
     Role,
@@ -50,6 +52,7 @@ from app.services.audit import record_audit
 from app.services.auth_service import AuthError
 from app.services.email import get_email_gateway
 from app.services.notifications import get_notification_gateway
+from app.services.residents_service import assert_consent
 from app.services.storage import (
     StorageError,
     get_storage_gateway,
@@ -118,6 +121,11 @@ def generate_handover(
         )
 
     case = _case_for_doctor(session, actor=actor, case_id=case_id)
+    # Brief §6 / DPDP: hospital handover is a separate PHI surface; the
+    # resident's EMERGENCY_SHARE_WITH_HOSPITAL consent gates both rendering
+    # and any link reissue (revocation is honoured immediately — assert_consent
+    # reads live state). The PHI never reaches storage if consent is missing.
+    assert_consent(session, case.resident_id, ConsentType.EMERGENCY_SHARE_WITH_HOSPITAL)
     context = _aggregate(
         session,
         case=case,
@@ -188,6 +196,15 @@ def issue_link(
     """Mint a fresh ≤15-minute signed link without re-rendering the PDF.
     Doctor/nurse/ops can re-share an already-generated handover."""
     handover = _handover_for_staff(session, actor=actor, handover_id=handover_id)
+    # If the resident revoked EMERGENCY_SHARE_WITH_HOSPITAL after the handover
+    # was generated, a re-share would push PHI to a now-unconsented surface.
+    # Reading consent live blocks that path (the existing PDF stays on storage
+    # for retention but cannot be re-shared via a fresh signed URL).
+    case = session.get(EmergencyCase, handover.case_id)
+    if case is not None:
+        assert_consent(
+            session, case.resident_id, ConsentType.EMERGENCY_SHARE_WITH_HOSPITAL
+        )
     record_audit(
         session,
         action=AuditAction.HANDOVER_LINK_ISSUED,
@@ -230,6 +247,14 @@ def dispatch_handover(
         )
 
     handover = _handover_for_staff(session, actor=actor, handover_id=handover_id)
+    # DPDP: dispatch is the moment PHI leaves the platform; gate it on live
+    # EMERGENCY_SHARE_WITH_HOSPITAL consent so revocation between generate and
+    # dispatch is honoured.
+    case = session.get(EmergencyCase, handover.case_id)
+    if case is not None:
+        assert_consent(
+            session, case.resident_id, ConsentType.EMERGENCY_SHARE_WITH_HOSPITAL
+        )
     signed = _signed_url(handover)
     subject = f"{get_settings().handover_email_subject_prefix} — {handover.hospital_destination}"
     body = _dispatch_body(handover=handover, signed_url=signed)
@@ -313,16 +338,48 @@ def _dispatch_one(
     subject: str,
     body: str,
 ) -> HandoverDispatch:
+    """Send one dispatch as a durable outbox step (mirrors the Slice 6
+    notification_attempts pattern):
+
+    1. Persist a ``queued`` row in its own commit so a crash here leaves the
+       row in the outbox (a future reaper can resume it).
+    2. Atomically claim ``queued -> sending`` in its own commit. A crash
+       between this and the provider returning leaves a ``sending`` row —
+       the documented "stuck claim" tradeoff (losing one notification beats
+       double-sending; see open-questions.md).
+    3. Call the provider.
+    4. Persist ``sent`` / ``failed`` (with error class name) in its own
+       commit; one channel's exception must never block the other.
+    """
     dispatch = HandoverDispatch(
         project_id=handover.project_id,
         handover_id=handover.id,
         actor_user_id=actor.id,
         channel=channel.value,
         recipient=recipient,
-        status=NotificationStatus.SENDING.value,
+        status=NotificationStatus.QUEUED.value,
     )
     session.add(dispatch)
-    session.flush()
+    session.commit()
+    session.refresh(dispatch)
+
+    # Atomic claim queued -> sending. If two callers ever race here (Slice 6's
+    # original use case), only one wins. We just inserted, so the claim is
+    # expected to succeed; the structure mirrors Slice 6's `_claim_attempt`.
+    claim = session.execute(
+        update(HandoverDispatch)
+        .where(
+            HandoverDispatch.id == dispatch.id,
+            HandoverDispatch.status == NotificationStatus.QUEUED.value,
+        )
+        .values(status=NotificationStatus.SENDING.value)
+    )
+    session.commit()
+    if claim.rowcount != 1:
+        session.refresh(dispatch)
+        return dispatch
+    session.refresh(dispatch)
+
     try:
         if channel is HandoverDispatchChannel.EMAIL:
             dispatch.provider_ref = get_email_gateway().send(
@@ -337,6 +394,7 @@ def _dispatch_one(
         dispatch.status = NotificationStatus.FAILED.value
         dispatch.error = exc.__class__.__name__
     session.add(dispatch)
+    session.commit()
     return dispatch
 
 
@@ -440,6 +498,22 @@ def _handover_for_staff(
 
 
 def _signed_url(handover: HandoverPdf) -> str:
+    """Return a ≤15-minute signed download URL for the handover PDF.
+
+    In ``provider_mode='stub'`` we emit a backend-proxied capability link
+    (`/api/v1/handover/file/{token}`) — the token is ``handover_url``-typed
+    (distinct from `record_url`) and binds the storage key, so the proxy
+    audits each download. In ``provider_mode='live'`` the S3 gateway returns
+    a native presigned GET that bypasses our backend; that path mirrors the
+    Slice 4 records gateway and is the **only** way live storage exposes
+    bytes (``S3StorageGateway.get_bytes`` raises by design — see
+    storage.py). Bucket-side access logs cover live audit; we still audit
+    LINK_ISSUED at issue time."""
+    settings = get_settings()
+    if settings.provider_mode == "live":
+        return get_storage_gateway().signed_url(
+            key=handover.storage_key, download_name=handover.file_name
+        )
     ttl = signed_url_ttl_seconds()
     token = create_handover_url_token(
         handover_id=handover.id,
@@ -447,7 +521,7 @@ def _signed_url(handover: HandoverPdf) -> str:
         download_name=handover.file_name,
         ttl=ttl,
     )
-    base = get_settings().public_base_url.rstrip("/")
+    base = settings.public_base_url.rstrip("/")
     return f"{base}/api/v1/handover/file/{token}"
 
 

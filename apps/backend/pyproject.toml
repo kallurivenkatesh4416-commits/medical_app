@@ -24,6 +24,10 @@ dependencies = [
     "jinja2>=3.1",
     "xhtml2pdf>=0.2.16",
     "pypdf>=4.3",
+    # Slice 6/8: live Twilio gateway (SMS / voice / WhatsApp) hits Twilio's
+    # REST API. `requests` is also transitively pulled in by xhtml2pdf;
+    # listing it explicitly so the live gateway has a guaranteed dep.
+    "requests>=2.31",
 ]
 
 [project.optional-dependencies]

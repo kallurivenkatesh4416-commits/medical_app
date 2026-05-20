@@ -223,6 +223,33 @@
   legal-review scoped — the implementation records dispatch attempts but does
   not decide that the receiving hospital has the right opt-in posture.
 
+### Slice 8 review fixes
+
+- **Hospital consent is now load-bearing.** Generation, link refresh, and
+  dispatch all call `assert_consent(resident_id, EMERGENCY_SHARE_WITH_HOSPITAL)`
+  before any PHI surface activates. Consent state is read live so a
+  revocation between generate and dispatch is honoured immediately; the
+  already-stored PDF stays for retention but cannot be re-shared.
+- **Live signed link uses the S3 native presigned GET.** `S3StorageGateway.get_bytes`
+  raises by design (live storage is never proxied through the backend), so
+  in `provider_mode='live'` the handover signed URL comes from the gateway
+  and bypasses our `/handover/file/{token}` route entirely. Bucket-side
+  access logs cover live audit; we still write `HANDOVER_LINK_ISSUED` at
+  the moment the link is minted.
+- **Live Twilio gateway implemented.** SMS / voice / WhatsApp now hit
+  Twilio's REST API with the Twilio `whatsapp:` prefix added inside the
+  gateway (so callers pass a normal phone number). FCM live wiring remains
+  a separate operator-keys task and `send_push` raises explicitly on the
+  live gateway; Slice 6's fan-out records FCM as failed without blocking
+  the other channels.
+- **Dispatch is now a durable outbox** (Slice 6 pattern): each
+  `handover_dispatches` row is committed in `queued`, atomically claimed
+  `queued -> sending` in its own commit, and the provider result (`sent`/
+  `failed` + `error`) is committed separately. A hard crash between claim
+  and provider response leaves a stuck `sending` row recoverable by a
+  reaper — same "lose one notification, never double-send" tradeoff as
+  notification_attempts, tracked in `docs/open-questions.md`.
+
 ## Open questions — `[NEEDS_LEGAL_REVIEW]`
 
 1. `[NEEDS_LEGAL_REVIEW]` DPDP cross-border data: acceptable AWS S3 region for
