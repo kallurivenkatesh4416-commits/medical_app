@@ -136,5 +136,46 @@ export const FallbackChannel = {
 } as const;
 export type FallbackChannel = (typeof FallbackChannel)[keyof typeof FallbackChannel];
 
+/** Audit action wire tokens mirrored from the backend enum. */
+export const AuditAction = {
+  OTP_REQUESTED: "otp_requested",
+  OTP_VERIFY_FAILED: "otp_verify_failed",
+  LOGIN_SUCCEEDED: "login_succeeded",
+  TOKEN_REFRESHED: "token_refreshed",
+  REFRESH_REUSE_BLOCKED: "refresh_reuse_blocked",
+  LOGOUT: "logout",
+  DISCLAIMER_ACKNOWLEDGED: "disclaimer_acknowledged",
+  RESIDENT_REGISTERED: "resident_registered",
+  CONSENT_GRANTED: "consent_granted",
+  CONSENT_REVOKED: "consent_revoked",
+  PATIENT_PROFILE_READ: "patient_profile_read",
+  ACCOUNT_CLOSURE_INITIATED: "account_closure_initiated",
+  RECORD_UPLOADED: "record_uploaded",
+  RECORD_LIST: "record_list",
+  RECORD_LINK_ISSUED: "record_link_issued",
+  EMERGENCY_ALERT_CREATED: "emergency_alert_created",
+  EMERGENCY_ALERT_LIST: "emergency_alert_list",
+  EMERGENCY_ALERT_ESCALATED: "emergency_alert_escalated",
+  EMERGENCY_FALLBACK_NUMBERS_READ: "emergency_fallback_numbers_read",
+  EMERGENCY_FALLBACK_INVOKED: "emergency_fallback_invoked",
+  EMERGENCY_CASE_READ: "emergency_case_read",
+  EMERGENCY_CASE_TRANSITIONED: "emergency_case_transitioned",
+  CASE_VITAL_RECORDED: "case_vital_recorded",
+  CASE_NOTE_RECORDED: "case_note_recorded",
+  EMERGENCY_KPI_READ: "emergency_kpi_read",
+  HANDOVER_GENERATED: "handover_generated",
+  HANDOVER_LINK_ISSUED: "handover_link_issued",
+  HANDOVER_DISPATCHED: "handover_dispatched",
+  HANDOVER_DOWNLOADED: "handover_downloaded",
+  MEDICINE_SCHEDULE_CREATED: "medicine_schedule_created",
+  MEDICINE_SCHEDULE_UPDATED: "medicine_schedule_updated",
+  MEDICINE_SCHEDULE_LIST: "medicine_schedule_list",
+  MEDICINE_DOSE_LOGGED: "medicine_dose_logged",
+  MEDICINE_ADHERENCE_READ: "medicine_adherence_read",
+  ADMIN_KPI_READ: "admin_kpi_read",
+  ADMIN_EXPORT_GENERATED: "admin_export_generated",
+} as const;
+export type AuditAction = (typeof AuditAction)[keyof typeof AuditAction];
+
 /** National emergency numbers — the ONLY hardcoded fallback numbers (brief §2.2). */
 export const NATIONAL_EMERGENCY_NUMBERS = ["108", "112"] as const;

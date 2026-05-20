@@ -61,6 +61,8 @@
 | GET | `/api/v1/residents/{resident_id}/medicines/schedules` | 9 | doctor / nurse / ops list; PHI-blocked for builder/security; `EMERGENCY_SHARE_WITH_DOCTOR` consent-gated; audited |
 | POST | `/api/v1/residents/{resident_id}/medicines/schedules/{id}/deactivate` | 9 | doctor stops a schedule |
 | GET | `/api/v1/residents/{resident_id}/medicines/adherence?days=N` | 9 | doctor / nurse / ops aggregate adherence (`taken`/`skipped`/`missed`/`scheduled_slots`); `missed` computed live from schedule + logs (no scheduler yet); 1–90 day window |
+| GET | `/api/v1/admin/kpis?days=N` | 10 | doctor / nurse / ops / builder_admin project aggregate KPIs only: emergency counts/response times, residents onboarded, records uploaded, medicine adherence totals; audited; no PHI identifiers |
+| GET | `/api/v1/admin/exports/monthly?month=YYYY-MM&format=csv\|pdf` | 10 | direct monthly aggregate export (CSV or PDF); no StorageGateway/signed link because no PHI; audited with `ADMIN_EXPORT_GENERATED` |
 
 Auth: `Authorization: Bearer <access>`. Access tokens are short-lived JWTs;
 refresh tokens are opaque, stored hashed, rotated on every use.

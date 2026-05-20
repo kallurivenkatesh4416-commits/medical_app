@@ -1,0 +1,60 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <style>
+      @page { size: A4; margin: 24mm 18mm; }
+      body { font-family: Helvetica, Arial, sans-serif; color: #18202b; font-size: 11px; }
+      h1 { font-size: 22px; margin: 0 0 4px; }
+      h2 { font-size: 14px; margin: 18px 0 8px; color: #1f6f5b; }
+      .meta { color: #596273; margin-bottom: 12px; }
+      table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+      th, td { border: 1px solid #d8dee8; padding: 6px 8px; text-align: left; }
+      th { background: #eef2f7; font-weight: bold; }
+      .note { margin-top: 18px; color: #596273; font-size: 10px; }
+    </style>
+  </head>
+  <body>
+    <h1>Monthly Admin KPI Export</h1>
+    <div class="meta">
+      {{ summary.window_label }} · generated {{ generated_at }} · aggregate only
+    </div>
+
+    <h2>Emergency Cases</h2>
+    <table>
+      <tr><th>Metric</th><th>Value</th></tr>
+      <tr><td>Total cases</td><td>{{ summary.emergency.total_cases }}</td></tr>
+      <tr><td>Active cases</td><td>{{ summary.emergency.active_cases }}</td></tr>
+      <tr><td>Closed cases</td><td>{{ summary.emergency.closed_cases }}</td></tr>
+      <tr><td>Average acknowledgement seconds</td><td>{{ summary.emergency.average_ack_seconds if summary.emergency.average_ack_seconds is not none else "n/a" }}</td></tr>
+      <tr><td>Average on-site seconds</td><td>{{ summary.emergency.average_on_site_seconds if summary.emergency.average_on_site_seconds is not none else "n/a" }}</td></tr>
+    </table>
+
+    <h2>Residents And Records</h2>
+    <table>
+      <tr><th>Metric</th><th>Value</th></tr>
+      <tr><td>Residents onboarded</td><td>{{ summary.residents.onboarded }}</td></tr>
+      <tr><td>Medical records uploaded</td><td>{{ summary.records.uploaded }}</td></tr>
+    </table>
+
+    <h2>Medicine Adherence</h2>
+    <table>
+      <tr><th>Metric</th><th>Value</th></tr>
+      <tr><td>Residents with reminder consent</td><td>{{ summary.medicines.consented_residents }}</td></tr>
+      <tr><td>Residents with reminders paused</td><td>{{ summary.medicines.consent_paused_residents }}</td></tr>
+      <tr><td>Scheduled taken</td><td>{{ summary.medicines.scheduled_taken }}</td></tr>
+      <tr><td>Scheduled skipped</td><td>{{ summary.medicines.scheduled_skipped }}</td></tr>
+      <tr><td>Missed</td><td>{{ summary.medicines.missed }}</td></tr>
+      <tr><td>Scheduled slots</td><td>{{ summary.medicines.scheduled_slots }}</td></tr>
+      <tr><td>Scheduled adherence percent</td><td>{{ summary.medicines.scheduled_adherence_percent if summary.medicines.scheduled_adherence_percent is not none else "n/a" }}</td></tr>
+      <tr><td>PRN taken</td><td>{{ summary.medicines.prn_taken }}</td></tr>
+      <tr><td>PRN skipped</td><td>{{ summary.medicines.prn_skipped }}</td></tr>
+    </table>
+
+    <p class="note">
+      This export intentionally contains aggregate counts and durations only.
+      It excludes resident names, flat numbers, case identifiers, record
+      identifiers, medicine names, notes, vitals, and signed links.
+    </p>
+  </body>
+</html>

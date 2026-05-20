@@ -195,3 +195,6 @@ class AuditAction(StrEnum):
     MEDICINE_SCHEDULE_LIST = "medicine_schedule_list"
     MEDICINE_DOSE_LOGGED = "medicine_dose_logged"
     MEDICINE_ADHERENCE_READ = "medicine_adherence_read"
+    # Slice 10 — aggregate-only admin dashboard and monthly exports.
+    ADMIN_KPI_READ = "admin_kpi_read"
+    ADMIN_EXPORT_GENERATED = "admin_export_generated"

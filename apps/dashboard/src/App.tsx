@@ -60,6 +60,33 @@ type Adherence = {
   schedules: AdherenceSchedule[];
 };
 
+type AdminKpis = {
+  project_id: string;
+  window_label: string;
+  window_start: string;
+  window_end: string;
+  emergency: {
+    total_cases: number;
+    active_cases: number;
+    closed_cases: number;
+    average_ack_seconds: number | null;
+    average_on_site_seconds: number | null;
+  };
+  residents: { onboarded: number };
+  records: { uploaded: number };
+  medicines: {
+    consented_residents: number;
+    consent_paused_residents: number;
+    scheduled_taken: number;
+    scheduled_skipped: number;
+    missed: number;
+    scheduled_slots: number;
+    prn_taken: number;
+    prn_skipped: number;
+    scheduled_adherence_percent: number | null;
+  };
+};
+
 const emptyVitals: VitalsDraft = {
   blood_pressure_systolic: "",
   blood_pressure_diastolic: "",
@@ -73,6 +100,7 @@ const disclaimer =
   "This app does not replace emergency hospital care. In a life-threatening situation, call 108 / 112 immediately.";
 
 const apiBaseDefault = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+const currentMonth = () => new Date().toISOString().slice(0, 7);
 
 export default function App() {
   const [apiBase, setApiBase] = useState(apiBaseDefault);
@@ -103,6 +131,12 @@ export default function App() {
   const [adherenceDays, setAdherenceDays] = useState("7");
   const [adherenceResult, setAdherenceResult] = useState<Adherence | null>(null);
   const [adherenceStatus, setAdherenceStatus] = useState("");
+  // Slice 10 — builder-admin aggregate KPIs. This panel never renders patient
+  // names, case ids, record ids, medicine names, or signed links.
+  const [adminDays, setAdminDays] = useState("30");
+  const [adminMonth, setAdminMonth] = useState(currentMonth);
+  const [adminKpis, setAdminKpis] = useState<AdminKpis | null>(null);
+  const [adminStatus, setAdminStatus] = useState("");
 
   const activeCount = alerts.length;
   const newest = useMemo(() => alerts[0], [alerts]);
@@ -289,6 +323,47 @@ export default function App() {
     setAdherenceStatus(`Loaded (${data.window_days}-day window)`);
   }
 
+  async function loadAdminKpis(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!token.trim()) return;
+    setAdminStatus("Loading");
+    const days = Number.parseInt(adminDays, 10) || 30;
+    const resp = await fetch(`${apiBaseClean}/api/v1/admin/kpis?days=${days}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!resp.ok) {
+      setAdminStatus(`KPI read failed (${resp.status})`);
+      setAdminKpis(null);
+      return;
+    }
+    const data = (await resp.json()) as AdminKpis;
+    setAdminKpis(data);
+    setAdminStatus(`Loaded ${data.window_label}`);
+  }
+
+  async function downloadAdminExport(format: "csv" | "pdf") {
+    if (!token.trim() || !adminMonth.trim()) return;
+    setAdminStatus(`Preparing ${format.toUpperCase()}`);
+    const resp = await fetch(
+      `${apiBaseClean}/api/v1/admin/exports/monthly?month=${adminMonth.trim()}&format=${format}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (!resp.ok) {
+      setAdminStatus(`Export failed (${resp.status})`);
+      return;
+    }
+    const blob = await resp.blob();
+    const href = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = href;
+    link.download = `admin-kpis-${adminMonth}.${format}`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(href);
+    setAdminStatus(`${format.toUpperCase()} ready`);
+  }
+
   async function refreshHandoverLink() {
     if (!handoverId || !token.trim()) return;
     setHandoverStatus("Refreshing link");
@@ -347,6 +422,89 @@ export default function App() {
           <span>{status}</span>
           <span>{lastUpdated ? `Updated ${lastUpdated}` : ""}</span>
         </div>
+      </section>
+
+      <section style={styles.workspace}>
+        <div style={styles.workspaceHeader}>
+          <div>
+            <p style={styles.kicker}>Admin KPIs</p>
+            <h2 style={styles.panelTitle}>Project Aggregate View</h2>
+          </div>
+          <span style={styles.status}>{adminStatus}</span>
+        </div>
+        <form onSubmit={loadAdminKpis} style={styles.formGrid}>
+          <label style={styles.field}>
+            Window (days)
+            <input
+              value={adminDays}
+              onChange={(event) => setAdminDays(event.target.value)}
+              style={styles.input}
+              inputMode="numeric"
+            />
+          </label>
+          <label style={styles.field}>
+            Export month
+            <input
+              value={adminMonth}
+              onChange={(event) => setAdminMonth(event.target.value)}
+              style={styles.input}
+              placeholder="YYYY-MM"
+            />
+          </label>
+          <button type="submit" style={styles.actionButton}>
+            Load KPIs
+          </button>
+          <div style={styles.exportActions}>
+            <button type="button" onClick={() => void downloadAdminExport("csv")} style={styles.smallButton}>
+              CSV
+            </button>
+            <button type="button" onClick={() => void downloadAdminExport("pdf")} style={styles.smallButton}>
+              PDF
+            </button>
+          </div>
+        </form>
+        {adminKpis ? (
+          <div style={styles.metricGrid}>
+            <div style={styles.metricTile}>
+              <span style={styles.kicker}>Emergency</span>
+              <strong style={styles.metricValue}>{adminKpis.emergency.total_cases}</strong>
+              <span style={styles.muted}>
+                {adminKpis.emergency.closed_cases} closed · {adminKpis.emergency.active_cases} active
+              </span>
+            </div>
+            <div style={styles.metricTile}>
+              <span style={styles.kicker}>Response</span>
+              <strong style={styles.metricValue}>
+                {adminKpis.emergency.average_ack_seconds ?? "n/a"}
+              </strong>
+              <span style={styles.muted}>avg ack seconds</span>
+            </div>
+            <div style={styles.metricTile}>
+              <span style={styles.kicker}>Residents</span>
+              <strong style={styles.metricValue}>{adminKpis.residents.onboarded}</strong>
+              <span style={styles.muted}>onboarded</span>
+            </div>
+            <div style={styles.metricTile}>
+              <span style={styles.kicker}>Records</span>
+              <strong style={styles.metricValue}>{adminKpis.records.uploaded}</strong>
+              <span style={styles.muted}>uploaded</span>
+            </div>
+            <div style={styles.metricTile}>
+              <span style={styles.kicker}>Medicines</span>
+              <strong style={styles.metricValue}>
+                {adminKpis.medicines.scheduled_adherence_percent ?? "n/a"}
+              </strong>
+              <span style={styles.muted}>scheduled adherence %</span>
+            </div>
+            <div style={styles.metricTile}>
+              <span style={styles.kicker}>Reminder Consent</span>
+              <strong style={styles.metricValue}>{adminKpis.medicines.consented_residents}</strong>
+              <span style={styles.muted}>
+                {adminKpis.medicines.consent_paused_residents} paused
+              </span>
+            </div>
+          </div>
+        ) : null}
       </section>
 
       <section style={styles.feed}>
@@ -765,6 +923,22 @@ const styles: Record<string, React.CSSProperties> = {
     gap: 10,
     alignItems: "end",
   },
+  exportActions: { display: "flex", gap: 8, alignItems: "end", minHeight: 40 },
+  metricGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+    gap: 10,
+  },
+  metricTile: {
+    minHeight: 112,
+    border: "1px solid #d9dee7",
+    borderRadius: 8,
+    padding: 12,
+    display: "grid",
+    alignContent: "space-between",
+    background: "#fbfcfe",
+  },
+  metricValue: { display: "block", fontSize: 26, lineHeight: 1.1, color: "#1d2430" },
   noteForm: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10 },
   textarea: {
     minHeight: 82,

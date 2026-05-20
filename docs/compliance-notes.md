@@ -341,6 +341,31 @@
   and the persisted DB value all speak the same shape. Already-naive
   inputs (assumed UTC) pass through unchanged.
 
+## Slice 10 implementation notes (admin KPIs + monthly export)
+
+- **Aggregate-only admin surface.** `/api/v1/admin/kpis` and
+  `/api/v1/admin/exports/monthly` return project-level counts and
+  durations only: emergency totals/response times, residents onboarded,
+  records uploaded, and medicine adherence totals. They never include
+  resident names, flat/villa numbers, case ids, record ids, medicine
+  names, vitals, notes, or signed links.
+- **Builder visibility stays separate from PHI routes.** `builder_admin`
+  can read the aggregate admin endpoints, but every patient-level route
+  remains behind `forbid_phi_roles`. Slice 10 extends the automated RBAC
+  matrix across real profile, record, emergency, handover, and medicine
+  PHI routes for both `builder_admin` and `security_desk`.
+- **Monthly export is direct, not a capability link.** The admin PDF/CSV
+  is streamed from the request/response path and audited with
+  `ADMIN_EXPORT_GENERATED`; it does not use the Slice 4/8
+  `StorageGateway`, object storage, or signed URL token types because it
+  carries no PHI.
+- **Medicine reminder consent is honoured in aggregates.** Residents who
+  revoked `MEDICINE_REMINDER_NOTIFICATIONS` are excluded from the project
+  adherence totals so paused reminder schedules do not keep contributing
+  slots or logs. PRN/as-needed medicine logs are exposed as separate
+  aggregate counters (`prn_taken` / `prn_skipped`) and are not used as a
+  denominator for scheduled adherence.
+
 ## Open questions — `[NEEDS_LEGAL_REVIEW]`
 
 1. `[NEEDS_LEGAL_REVIEW]` DPDP cross-border data: acceptable AWS S3 region for

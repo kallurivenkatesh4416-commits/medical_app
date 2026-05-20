@@ -112,4 +112,12 @@
   is now populated from this table (the §8 placeholder is gone when any
   active schedule exists).
 
+- **Slice 10**: no new tables. The admin dashboard and monthly export are
+  derived from existing tenant-scoped rows (`emergency_cases`, `residents`,
+  `medical_records`, `medicine_schedules`, `medicine_dose_logs`, `consents`).
+  Export/read activity is captured in `audit_log` via
+  `admin_kpi_read` / `admin_export_generated`. The PDF/CSV response is
+  streamed directly and intentionally never writes to `StorageGateway`
+  because it contains aggregate counts and durations only, not PHI.
+
 _Schema continues to grow per slice._

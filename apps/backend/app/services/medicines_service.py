@@ -495,6 +495,96 @@ def adherence_summary_for_staff(
     }
 
 
+def project_adherence_summary(
+    session: Session,
+    *,
+    project_id: uuid.UUID,
+    window_start: datetime,
+    now: datetime,
+) -> dict:
+    """Aggregate adherence for Slice 10 admin KPIs.
+
+    This is deliberately project-level and PHI-free: no resident ids,
+    schedule ids, or medicine names leave the service. Residents who revoked
+    ``MEDICINE_REMINDER_NOTIFICATIONS`` are excluded so paused reminders do
+    not keep contributing slots or logs to admin totals.
+    """
+    residents = session.exec(
+        select(Resident).where(Resident.project_id == project_id)
+    ).all()
+    consented_resident_ids = [
+        resident.id
+        for resident in residents
+        if _has_consent(
+            session,
+            resident_id=resident.id,
+            consent=ConsentType.MEDICINE_REMINDER_NOTIFICATIONS,
+        )
+    ]
+    totals = {
+        "consented_residents": len(consented_resident_ids),
+        "consent_paused_residents": len(residents) - len(consented_resident_ids),
+        "scheduled_taken": 0,
+        "scheduled_skipped": 0,
+        "missed": 0,
+        "scheduled_slots": 0,
+        "prn_taken": 0,
+        "prn_skipped": 0,
+        "scheduled_adherence_percent": None,
+    }
+    if not consented_resident_ids:
+        return totals
+
+    schedules = session.exec(
+        select(MedicineSchedule).where(
+            MedicineSchedule.resident_id.in_(consented_resident_ids)  # type: ignore[attr-defined]
+        )
+    ).all()
+    if not schedules:
+        return totals
+
+    schedule_ids = [schedule.id for schedule in schedules]
+    logs = session.exec(
+        select(MedicineDoseLog).where(
+            MedicineDoseLog.schedule_id.in_(schedule_ids),  # type: ignore[attr-defined]
+            MedicineDoseLog.scheduled_for >= window_start,
+            MedicineDoseLog.scheduled_for <= now,
+        )
+    ).all()
+
+    for schedule in schedules:
+        sched_logs = [log for log in logs if log.schedule_id == schedule.id]
+        taken = sum(1 for log in sched_logs if log.status == MedicineDoseStatus.TAKEN.value)
+        skipped = sum(
+            1 for log in sched_logs if log.status == MedicineDoseStatus.SKIPPED.value
+        )
+        if schedule.frequency == MedicineFrequency.AS_NEEDED.value:
+            totals["prn_taken"] += taken
+            totals["prn_skipped"] += skipped
+            continue
+
+        slots = _expand_slots(schedule, window_start=window_start, now=now)
+        logged_slots = {log.scheduled_for for log in sched_logs}
+        missed = sum(
+            1
+            for slot in slots
+            if slot not in logged_slots
+            and (now - slot).total_seconds() > MISSED_GRACE_SECONDS
+        )
+        totals["scheduled_taken"] += taken
+        totals["scheduled_skipped"] += skipped
+        totals["missed"] += missed
+        totals["scheduled_slots"] += len(slots)
+
+    scheduled_slots = totals["scheduled_slots"]
+    if scheduled_slots:
+        totals["scheduled_adherence_percent"] = round(
+            (totals["scheduled_taken"] / scheduled_slots) * 100,
+            1,
+        )
+    return totals
+
+
 # --------------------------------------------------------------------------- #
 # Serialization                                                                #
 # --------------------------------------------------------------------------- #

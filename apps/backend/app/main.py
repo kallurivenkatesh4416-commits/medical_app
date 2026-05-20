@@ -9,6 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import __version__
+from app.api.admin import router as admin_router
 from app.api.auth import router as auth_router
 from app.api.emergency import router as emergency_router
 from app.api.handover import router as handover_router
@@ -56,6 +57,7 @@ def create_app() -> FastAPI:
     app.include_router(emergency_router)
     app.include_router(handover_router)
     app.include_router(medicines_router)
+    app.include_router(admin_router)
 
     log.info("app_started", env=settings.app_env, provider_mode=settings.provider_mode)
     return app

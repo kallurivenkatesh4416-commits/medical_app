@@ -21,5 +21,9 @@ patient arrives.
 ## Run (grows per slice)
 
 - Slice 1: `docker compose up` → `/healthz` + `/readyz` green, `/docs` loads.
+- Slice 10 checkpoint: login as `builder_admin`, load
+  `/api/v1/admin/kpis?days=30` from the dashboard, download the monthly CSV/PDF,
+  then verify patient drill-in routes return 403 for the same token. The export
+  should show counts and durations only.
 
-_Status: skeleton (Slice 1)._
+_Status: Slices 1-10 demoable through PHI-free admin KPIs and monthly export._
