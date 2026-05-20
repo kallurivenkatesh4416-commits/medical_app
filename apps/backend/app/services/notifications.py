@@ -30,10 +30,20 @@ class NotificationGateway(Protocol):
 
     def place_voice_call(self, *, to: str, twiml_url: str) -> str: ...
 
+    # Slice 8: WhatsApp dispatch for the hospital handover signed link. Twilio
+    # WhatsApp uses the same auth as SMS but a ``whatsapp:`` prefix on both
+    # the sender and recipient — the gateway encapsulates that detail so
+    # callers pass a normal phone number.
+    def send_whatsapp(self, *, to: str, body: str) -> str: ...
+
 
 class StubNotificationGateway:
     """Console/log stub — zero external deps, used in dev/CI. Never logs the
-    message body (an OTP is a secret); only a masked recipient + channel."""
+    message body (an OTP is a secret); only a masked recipient + channel.
+    WhatsApp captures are kept on the class so tests can assert dispatch
+    without standing up Twilio."""
+
+    sent_whatsapp: list[dict[str, str]] = []
 
     def send_sms(self, *, to: str, body: str) -> str:
         _log.info("stub_sms", to=_mask(to))
@@ -46,6 +56,11 @@ class StubNotificationGateway:
     def place_voice_call(self, *, to: str, twiml_url: str) -> str:
         _log.info("stub_voice", to=_mask(to))
         return "stub-voice"
+
+    def send_whatsapp(self, *, to: str, body: str) -> str:
+        StubNotificationGateway.sent_whatsapp.append({"to": to, "body": body})
+        _log.info("stub_whatsapp", to=_mask(to))
+        return f"stub-whatsapp-{len(StubNotificationGateway.sent_whatsapp)}"
 
 
 def get_notification_gateway() -> NotificationGateway:

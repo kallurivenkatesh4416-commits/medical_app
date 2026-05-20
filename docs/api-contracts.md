@@ -49,6 +49,10 @@
 | POST | `/api/v1/emergency/alerts/{case_id}/vitals` | 7 | doctor/nurse records manual vitals after `on_site`; audited and timeline-backed |
 | POST | `/api/v1/emergency/alerts/{case_id}/notes` | 7 | doctor/nurse records case notes; treatment/escalation notes require doctor role; treatment notes capture Telemedicine fields |
 | GET | `/api/v1/emergency/kpis` | 7 | PHI-free project aggregate KPIs (`total/active/closed`, average ack/on-site seconds); builder_admin can read |
+| POST | `/api/v1/emergency/alerts/{case_id}/handover` | 8 | doctor-only; generates a §8-complete PDF, stores it encrypted, returns the signed link (TTL hard-capped at 900s) and freezes the doctor's name + registration number into the row |
+| GET | `/api/v1/handover/{handover_id}/link` | 8 | doctor/nurse/ops; mints a fresh ≤15-min signed link without re-rendering; audited |
+| POST | `/api/v1/handover/{handover_id}/dispatch` | 8 | doctor-only; sends the signed link by email (Mailhog dev / SMTP live) and/or WhatsApp (Twilio); one channel failing must not block the other; persists one `handover_dispatches` row per channel |
+| GET | `/api/v1/handover/file/{token}` | 8 | capability-token-gated PDF download (token type distinct from `record_url`); 401 on invalid/expired; 404 on missing; audited |
 
 Auth: `Authorization: Bearer <access>`. Access tokens are short-lived JWTs;
 refresh tokens are opaque, stored hashed, rotated on every use.

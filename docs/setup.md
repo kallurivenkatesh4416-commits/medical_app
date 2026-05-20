@@ -43,6 +43,28 @@ Then:
 - Slice 7: the dashboard can drive case lifecycle transitions, record vitals,
   and add Telemedicine-complete notes. `GET /api/v1/emergency/kpis` returns
   PHI-free project aggregates for operational dashboards.
+- Slice 8: hospital handover PDF. From the dashboard's selected case, a
+  doctor generates a §8-complete PDF (`POST /api/v1/emergency/alerts/{id}/handover`),
+  receives a 15-minute signed link, can refresh the link
+  (`GET /api/v1/handover/{id}/link`), and can dispatch it by email and/or
+  WhatsApp (`POST /api/v1/handover/{id}/dispatch`). The signed file route
+  (`GET /api/v1/handover/file/{token}`) is the only PHI surface that is
+  capability-token-gated rather than auth-gated; the token type is distinct
+  from the records token so a leaked record link cannot fetch a handover.
+  Email lands via Mailhog (UI on port 8025) in dev; WhatsApp is routed
+  through the Twilio gateway (stub in dev, live with `PROVIDER_MODE=live`
+  plus `TWILIO_WHATSAPP_FROM`).
+
+### PDF renderer — WeasyPrint → xhtml2pdf substitution
+
+PLAN.md §4 names WeasyPrint as the handover-PDF renderer. WeasyPrint requires
+the GTK/Pango native runtime, which is impractical for Windows local dev and
+adds an apt/native dep to CI and the backend Docker image. Slice 8 substitutes
+**xhtml2pdf** — pure-Python, same Jinja2 HTML template, sufficient for §8's
+form-style layout. PDF contents are asserted in tests via `pypdf`. If a richer
+CSS engine is required later (e.g. multi-column or advanced flexbox in a
+later slice), reintroduce WeasyPrint behind the same `_render_pdf` seam in
+`apps/backend/app/services/handover_service.py` and document the GTK install.
 
 ## Backend dev (without Docker)
 
@@ -70,9 +92,10 @@ real SMS provider. Seeded demo phones are `+15550000001`…`+15550000009`
 See `.env.example` (annotated). Provider keys (Twilio/FCM/AWS) are only needed from
 the slice that uses them; default `PROVIDER_MODE=stub` needs no external accounts.
 
-_Status: Slices 1-7 cover backend foundation, auth/RBAC/audit,
+_Status: Slices 1-8 cover backend foundation, auth/RBAC/audit,
 onboarding/consent/profile, medical-record upload/list/link, the emergency
-happy path with dashboard feed, and emergency hardening (3-channel fan-out,
+happy path with dashboard feed, emergency hardening (3-channel fan-out,
 on-call resolution, 60s backup escalation, mobile offline retry + fallback
-sheet), plus case lifecycle, vitals, notes, and aggregate emergency KPIs. Live
-Twilio/FCM is verified with operator keys. Hospital handover PDF is Slice 8._
+sheet), case lifecycle/vitals/notes/aggregate KPIs, and hospital handover
+PDF (xhtml2pdf, 15-minute signed link, email + WhatsApp dispatch). Live
+Twilio/FCM/WhatsApp + live SMTP are verified with operator keys._

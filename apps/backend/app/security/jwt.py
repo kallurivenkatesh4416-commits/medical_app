@@ -96,3 +96,43 @@ def decode_record_url_token(token: str) -> tuple[str, str]:
     if not key:
         raise TokenError("missing subject")
     return key, payload.get("dn") or "record"
+
+
+def create_handover_url_token(
+    *, handover_id: uuid.UUID, storage_key: str, download_name: str, ttl: int
+) -> str:
+    """Slice 8: signed-link token bound to a single handover row. The token
+    type is kept distinct from ``record_url`` so a leaked record link can never
+    be replayed against the handover endpoint, and the audit trail can tell
+    the two PHI surfaces apart."""
+    settings = get_settings()
+    now = datetime.now(tz=UTC)
+    payload: dict[str, Any] = {
+        "sub": str(handover_id),
+        "sk": storage_key,
+        "dn": download_name,
+        "type": TokenType.HANDOVER_URL.value,
+        "iat": now,
+        "exp": now + timedelta(seconds=ttl),
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+def decode_handover_url_token(token: str) -> tuple[uuid.UUID, str, str]:
+    """Return (handover_id, storage_key, download_name); raise TokenError if
+    invalid/expired/wrong-type."""
+    settings = get_settings()
+    try:
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+    except jwt.PyJWTError as exc:
+        raise TokenError(str(exc)) from exc
+    if payload.get("type") != TokenType.HANDOVER_URL.value:
+        raise TokenError("not a handover url token")
+    handover_id = payload.get("sub")
+    storage_key = payload.get("sk")
+    if not handover_id or not storage_key:
+        raise TokenError("missing handover binding")
+    try:
+        return uuid.UUID(handover_id), storage_key, payload.get("dn") or "handover.pdf"
+    except ValueError as exc:
+        raise TokenError("invalid handover id") from exc

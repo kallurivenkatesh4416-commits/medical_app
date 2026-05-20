@@ -48,6 +48,8 @@ apps/mobile/android/local.properties
 # --- Docker / local infra ---
 .localstack/
 pgdata/
+# Local stub StorageGateway blobs (encrypted at rest but never PHI we want in git)
+apps/backend/var/
 
 # --- OS / editor ---
 .DS_Store

@@ -80,4 +80,18 @@
   lifecycle transition, vital entry, and note entry writes both `case_events`
   and `audit_log`.
 
+- **Slice 8** (migration `0008_handover_pdfs`): `handover_pdfs` records one row
+  per generated hospital handover PDF — case + project scope, generator user,
+  encrypted-object `storage_key` (unique), sanitised file name, size, and
+  **frozen** doctor identity (`doctor_name`, `doctor_registration_number`) +
+  `hospital_destination` so the signed PDF stays an honest clinical record
+  even if the doctor's profile changes later. `handover_dispatches` records
+  one row per dispatch attempt (`channel` ∈ `email`/`whatsapp`, plaintext
+  `recipient`, `status` reuses `NotificationStatus`, `provider_ref`/`error`,
+  `attempted_at`); a failed channel never blocks the other. Case-event types
+  `handover_generated` and `handover_dispatched` extend the existing case
+  timeline. PHI never leaves the row — outbound mail/WhatsApp carry only the
+  short-lived signed link (token type `handover_url`, distinct from
+  `record_url`).
+
 _Schema continues to grow per slice._

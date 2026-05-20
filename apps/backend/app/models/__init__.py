@@ -16,6 +16,7 @@ from app.models.emergency import (
     NotificationAttempt,
 )
 from app.models.emergency_contact import EmergencyContact
+from app.models.handover import HandoverDispatch, HandoverPdf
 from app.models.idempotency import IdempotencyKey
 from app.models.medical_profile import MedicalProfile
 from app.models.medical_record import MedicalRecord
@@ -35,6 +36,8 @@ __all__ = [
     "DeviceToken",
     "EmergencyContact",
     "EmergencyCase",
+    "HandoverDispatch",
+    "HandoverPdf",
     "IdempotencyKey",
     "MedicalProfile",
     "MedicalRecord",

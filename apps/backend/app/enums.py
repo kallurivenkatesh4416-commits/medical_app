@@ -29,6 +29,11 @@ class TokenType(StrEnum):
     REGISTRATION = "registration"
     # Capability token embedded in a stub signed download URL (<=15 min).
     RECORD_URL = "record_url"
+    # Slice 8 capability token for the hospital handover PDF (<=15 min). Kept
+    # distinct from RECORD_URL so the audit trail can tell the two PHI surfaces
+    # apart and a leaked record link can never be replayed against the handover
+    # endpoint (and vice versa).
+    HANDOVER_URL = "handover_url"
 
 
 class MedicalRecordType(StrEnum):
@@ -52,6 +57,16 @@ class NotificationChannel(StrEnum):
     FCM = "fcm"
     SMS = "sms"
     VOICE = "voice"
+
+
+class HandoverDispatchChannel(StrEnum):
+    """Slice 8: how the hospital handover PDF (signed link) is sent to the
+    receiving hospital. Email lands via the dev Mailhog SMTP; WhatsApp lands
+    via the Twilio WhatsApp gateway (live keys; stub in dev/CI). The PDF body
+    itself is never embedded — only the short-lived signed link is shared."""
+
+    EMAIL = "email"
+    WHATSAPP = "whatsapp"
 
 
 class NotificationStatus(StrEnum):
@@ -135,3 +150,8 @@ class AuditAction(StrEnum):
     CASE_VITAL_RECORDED = "case_vital_recorded"
     CASE_NOTE_RECORDED = "case_note_recorded"
     EMERGENCY_KPI_READ = "emergency_kpi_read"
+    # Slice 8 — hospital handover PDF.
+    HANDOVER_GENERATED = "handover_generated"
+    HANDOVER_LINK_ISSUED = "handover_link_issued"
+    HANDOVER_DISPATCHED = "handover_dispatched"
+    HANDOVER_DOWNLOADED = "handover_downloaded"

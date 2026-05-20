@@ -63,6 +63,15 @@ export default function App() {
   const [doctorRegistration, setDoctorRegistration] = useState("");
   const [adviceGiven, setAdviceGiven] = useState("");
   const [patientConsent, setPatientConsent] = useState(false);
+  // Slice 8 — handover PDF state. The signed link is kept in memory only;
+  // we never persist a capability token to localStorage (15-min window).
+  const [hospitalDestination, setHospitalDestination] = useState("");
+  const [doctorAssessment, setDoctorAssessment] = useState("");
+  const [handoverLink, setHandoverLink] = useState<string | null>(null);
+  const [handoverId, setHandoverId] = useState<string | null>(null);
+  const [dispatchEmail, setDispatchEmail] = useState("");
+  const [dispatchWhatsapp, setDispatchWhatsapp] = useState("");
+  const [handoverStatus, setHandoverStatus] = useState("");
 
   const activeCount = alerts.length;
   const newest = useMemo(() => alerts[0], [alerts]);
@@ -166,6 +175,84 @@ export default function App() {
     });
     setNoteBody("");
     setAdviceGiven("");
+  }
+
+  async function generateHandover(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selected || !token.trim()) return;
+    setHandoverStatus("Generating");
+    const resp = await fetch(
+      `${apiBaseClean}/api/v1/emergency/alerts/${selected.id}/handover`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          hospital_destination: hospitalDestination,
+          // The dashboard reuses the registration number captured for the
+          // treatment note — same doctor, same handover signature line.
+          doctor_registration_number: doctorRegistration,
+          doctor_assessment: doctorAssessment || null,
+        }),
+      },
+    );
+    if (!resp.ok) {
+      setHandoverStatus(`Handover failed (${resp.status})`);
+      return;
+    }
+    const data = (await resp.json()) as { id: string; signed_url: string };
+    setHandoverId(data.id);
+    setHandoverLink(data.signed_url);
+    setHandoverStatus("Ready (link expires in 15 min)");
+  }
+
+  async function dispatchHandover(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!handoverId || !token.trim()) return;
+    setHandoverStatus("Dispatching");
+    const resp = await fetch(
+      `${apiBaseClean}/api/v1/handover/${handoverId}/dispatch`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: dispatchEmail || null,
+          whatsapp: dispatchWhatsapp || null,
+        }),
+      },
+    );
+    if (!resp.ok) {
+      setHandoverStatus(`Dispatch failed (${resp.status})`);
+      return;
+    }
+    const data = (await resp.json()) as {
+      dispatches: { channel: string; status: string; error: string | null }[];
+    };
+    const summary = data.dispatches
+      .map((d) => `${d.channel}: ${d.status}${d.error ? ` (${d.error})` : ""}`)
+      .join(" · ");
+    setHandoverStatus(summary || "Dispatched");
+  }
+
+  async function refreshHandoverLink() {
+    if (!handoverId || !token.trim()) return;
+    setHandoverStatus("Refreshing link");
+    const resp = await fetch(
+      `${apiBaseClean}/api/v1/handover/${handoverId}/link`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (!resp.ok) {
+      setHandoverStatus(`Link refresh failed (${resp.status})`);
+      return;
+    }
+    const data = (await resp.json()) as { url: string };
+    setHandoverLink(data.url);
+    setHandoverStatus("Ready (link expires in 15 min)");
   }
 
   return (
@@ -351,6 +438,69 @@ export default function App() {
               Save Note
             </button>
           </form>
+
+          <div style={styles.handoverPanel}>
+            <p style={styles.kicker}>Hospital Handover PDF</p>
+            <form onSubmit={generateHandover} style={styles.noteForm}>
+              <label style={styles.field}>
+                Hospital destination
+                <input
+                  value={hospitalDestination}
+                  onChange={(event) => setHospitalDestination(event.target.value)}
+                  style={styles.input}
+                  placeholder="e.g. Apollo Hospital, Sarjapur Road"
+                />
+              </label>
+              <label style={styles.field}>
+                Doctor's refined assessment (optional)
+                <textarea
+                  value={doctorAssessment}
+                  onChange={(event) => setDoctorAssessment(event.target.value)}
+                  style={styles.textarea}
+                />
+              </label>
+              <button type="submit" style={styles.actionButton}>
+                Generate Handover PDF
+              </button>
+            </form>
+            {handoverLink ? (
+              <div style={styles.handoverLinkRow}>
+                <a href={handoverLink} target="_blank" rel="noreferrer" style={styles.handoverLink}>
+                  Open signed PDF
+                </a>
+                <button type="button" onClick={refreshHandoverLink} style={styles.smallButton}>
+                  Refresh link
+                </button>
+              </div>
+            ) : null}
+            {handoverId ? (
+              <form onSubmit={dispatchHandover} style={styles.noteForm}>
+                <label style={styles.field}>
+                  Hospital email
+                  <input
+                    type="email"
+                    value={dispatchEmail}
+                    onChange={(event) => setDispatchEmail(event.target.value)}
+                    style={styles.input}
+                    placeholder="er@hospital.example"
+                  />
+                </label>
+                <label style={styles.field}>
+                  Hospital WhatsApp
+                  <input
+                    value={dispatchWhatsapp}
+                    onChange={(event) => setDispatchWhatsapp(event.target.value)}
+                    style={styles.input}
+                    placeholder="+919xxxxxxxxx"
+                  />
+                </label>
+                <button type="submit" style={styles.actionButton}>
+                  Send Handover
+                </button>
+              </form>
+            ) : null}
+            {handoverStatus ? <p style={styles.muted}>{handoverStatus}</p> : null}
+          </div>
         </section>
       ) : null}
 
@@ -513,5 +663,18 @@ const styles: Record<string, React.CSSProperties> = {
     resize: "vertical",
   },
   checkboxRow: { display: "flex", alignItems: "center", gap: 8, color: "#596273", fontSize: 14 },
+  handoverPanel: {
+    marginTop: 6,
+    paddingTop: 12,
+    borderTop: "1px dashed #c9d0da",
+    display: "grid",
+    gap: 10,
+  },
+  handoverLinkRow: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
+  handoverLink: {
+    color: "#1f6f5b",
+    fontWeight: 700,
+    textDecoration: "underline",
+  },
   footer: { maxWidth: 1120, margin: "18px auto 0", color: "#596273", fontSize: 13 },
 };

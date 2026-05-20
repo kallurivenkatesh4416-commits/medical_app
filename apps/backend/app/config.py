@@ -75,6 +75,20 @@ class Settings(BaseSettings):
     public_base_url: str = "http://localhost:8000"
     max_upload_bytes: int = 15_728_640  # 15 MiB
 
+    # --- Hospital handover PDF (Slice 8) ---
+    # Mailhog in docker-compose. Live SMTP / SES credentials are picked up
+    # when provider_mode='live'; the dev stub never opens a socket.
+    smtp_host: str = "localhost"
+    smtp_port: int = 1025
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_use_tls: bool = False
+    handover_email_from: str = "handover@med-emergency.local"
+    handover_email_subject_prefix: str = "Hospital handover"
+    # Twilio WhatsApp sender (e.g. 'whatsapp:+14155238886'). Used only when
+    # provider_mode='live'; the stub gateway ignores it.
+    twilio_whatsapp_from: str | None = None
+
 
 @lru_cache
 def get_settings() -> Settings:

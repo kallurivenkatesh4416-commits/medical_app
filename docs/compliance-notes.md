@@ -189,6 +189,40 @@
   clinical detail. `builder_admin` can read the KPI endpoint, but cannot read
   patient-level case detail, vitals, or notes.
 
+## Slice 8 implementation notes (hospital handover PDF)
+
+- The handover PDF is a §8-complete clinical handover (header / patient
+  details / complaint / timeline / vitals / history / medicines / observation
+  / treatment / escalation reason / family contact / attached-records list /
+  signed footer). Generation is **doctor-only** (the doctor's name and
+  medical-council registration number are frozen onto the row at generation
+  time so the signed PDF stays an honest record even if the profile changes).
+- The PDF body lives in encrypted object storage (Slice 4 `StorageGateway`
+  — Fernet at rest in dev, SSE-KMS / SSE-S3 in prod). Access is **only** via a
+  short-lived signed link, hard-capped at 900 seconds (15 minutes), matching
+  the medical-records guarantee.
+- The signed-link token type is `handover_url` (distinct from `record_url`)
+  so a leaked record link cannot replay the handover endpoint and vice
+  versa; the audit trail can tell the two PHI surfaces apart.
+- The PDF body is **never embedded** in outbound mail or WhatsApp — only the
+  short-lived signed link is shared, so DPDP revocation/expiry stays
+  enforceable. WeasyPrint→xhtml2pdf renderer substitution is documented in
+  `docs/setup.md`.
+- Email dispatch lands via Mailhog in dev (SMTP localhost:1025) and SES /
+  Mailgun / SMTP in prod (`PROVIDER_MODE=live`). WhatsApp routes through the
+  Twilio gateway (stub in dev, live with `TWILIO_WHATSAPP_FROM`). One channel
+  failing is logged on the dispatch row and does not block the other channel
+  — same fan-out invariant as Slice 6.
+- Every step writes both `case_events` (`handover_generated`,
+  `handover_dispatched`) and `audit_log` (`HANDOVER_GENERATED`,
+  `HANDOVER_LINK_ISSUED`, `HANDOVER_DISPATCHED`, `HANDOVER_DOWNLOADED`). The
+  download audit row has `actor_user_id=null` because the capability-token
+  link is unauthenticated by design; the link itself proves authorisation,
+  same as `records/download/{token}`.
+- Item #5 below (WhatsApp record-keeping for hospital PHI consent) remains
+  legal-review scoped — the implementation records dispatch attempts but does
+  not decide that the receiving hospital has the right opt-in posture.
+
 ## Open questions — `[NEEDS_LEGAL_REVIEW]`
 
 1. `[NEEDS_LEGAL_REVIEW]` DPDP cross-border data: acceptable AWS S3 region for

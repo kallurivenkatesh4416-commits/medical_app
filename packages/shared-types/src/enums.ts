@@ -80,6 +80,19 @@ export const CaseNoteType = {
 export type CaseNoteType = (typeof CaseNoteType)[keyof typeof CaseNoteType];
 
 /**
+ * Slice 8 — how the hospital handover PDF (short-lived signed link) reaches
+ * the receiving hospital. Email lands via the dev Mailhog SMTP; WhatsApp via
+ * Twilio WhatsApp (live keys, stub in dev/CI). The PDF body is never embedded
+ * — only the signed link is shared so revocation/expiry stays enforceable.
+ */
+export const HandoverDispatchChannel = {
+  EMAIL: "email",
+  WHATSAPP: "whatsapp",
+} as const;
+export type HandoverDispatchChannel =
+  (typeof HandoverDispatchChannel)[keyof typeof HandoverDispatchChannel];
+
+/**
  * Targets on the mobile 60s failed-alert fallback sheet (PLAN.md Slice 6).
  * Every tap records a `case_events` row with the chosen channel.
  */

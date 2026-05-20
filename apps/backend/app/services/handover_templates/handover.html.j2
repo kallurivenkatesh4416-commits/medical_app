@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Hospital Handover — Case {{ short_case_id }}</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm 16mm 16mm; }
+  body { font-family: Helvetica, Arial, sans-serif; font-size: 10.5pt; color: #1d2430; }
+  h1 { font-size: 14pt; margin: 0 0 4pt 0; }
+  h2 { font-size: 10.5pt; margin: 10pt 0 2pt 0; padding: 0; color: #283142; }
+  p { margin: 2pt 0; }
+  table { width: 100%; border-collapse: collapse; margin: 4pt 0 6pt 0; }
+  th, td { text-align: left; padding: 3pt 5pt; border-bottom: 1px solid #d6dae2; vertical-align: top; font-size: 10pt; }
+  th { background: #eef2f7; font-weight: bold; }
+  .header { border-bottom: 2px solid #1f6f5b; padding-bottom: 6pt; margin-bottom: 6pt; }
+  .header .meta { font-size: 9.5pt; color: #4a5363; }
+  .confidential { float: right; font-weight: bold; color: #b1331c; letter-spacing: 1pt; font-size: 9pt; }
+  .section { padding: 4pt 0; }
+  .kvgrid td.k { width: 32%; color: #4a5363; }
+  .empty { color: #7a8194; font-style: italic; }
+  .footer { margin-top: 14pt; padding-top: 6pt; border-top: 1px solid #c9d0da; font-size: 9.5pt; color: #4a5363; }
+  .sigline { display: inline-block; border-bottom: 1px solid #1d2430; width: 60mm; height: 14pt; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <span class="confidential">CONFIDENTIAL — PATIENT HANDOVER</span>
+  <h1>{{ project_name }}</h1>
+  <div class="meta">
+    Case ID: <strong>{{ case_id }}</strong> &nbsp;·&nbsp;
+    Generated: {{ generated_at_str }}
+  </div>
+</div>
+
+<h2>1. Patient Details</h2>
+<table class="kvgrid">
+  <tr><td class="k">Name</td><td>{{ patient.name or '—' }}</td></tr>
+  <tr><td class="k">Age</td><td>{{ patient.age if patient.age is not none else '—' }}</td></tr>
+  <tr><td class="k">Gender</td><td>{{ patient.gender or '—' }}</td></tr>
+  <tr><td class="k">Blood group</td><td>{{ patient.blood_group or '—' }}</td></tr>
+  <tr><td class="k">Flat / Villa</td><td>{{ patient.flat_villa_number or '—' }}</td></tr>
+</table>
+
+<h2>2. Emergency Complaint</h2>
+<p>
+  Resident-reported symptoms: {{ complaint.symptoms or 'not specified' }}
+</p>
+<p>
+  Doctor's refined assessment: {{ complaint.assessment or 'pending' }}
+</p>
+
+<h2>3. Timeline</h2>
+<table>
+  <tr><th>Event</th><th>Time</th></tr>
+  <tr><td>Alert raised</td><td>{{ timeline.alert_time or '—' }}</td></tr>
+  <tr><td>Doctor acknowledged</td><td>{{ timeline.acknowledged_at or '—' }}</td></tr>
+  <tr><td>En route</td><td>{{ timeline.en_route_at or '—' }}</td></tr>
+  <tr><td>On site</td><td>{{ timeline.on_site_at or '—' }}</td></tr>
+  <tr><td>Escalated</td><td>{{ timeline.escalated_at or '—' }}</td></tr>
+</table>
+
+<h2>4. Vitals</h2>
+{% if vitals %}
+<table>
+  <tr><th>Time</th><th>BP</th><th>SpO2</th><th>HR</th><th>RR</th><th>Temp °C</th></tr>
+  {% for v in vitals %}
+  <tr>
+    <td>{{ v.recorded_at_str }}</td>
+    <td>{% if v.bp_systolic and v.bp_diastolic %}{{ v.bp_systolic }}/{{ v.bp_diastolic }}{% else %}—{% endif %}</td>
+    <td>{{ v.spo2 or '—' }}</td>
+    <td>{{ v.heart_rate or '—' }}</td>
+    <td>{{ v.respiratory_rate or '—' }}</td>
+    <td>{{ v.temperature or '—' }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% if vitals_sparkline %}
+<p class="meta">Trend (most recent first): {{ vitals_sparkline }}</p>
+{% endif %}
+{% else %}
+<p class="empty">No vitals recorded.</p>
+{% endif %}
+
+<h2>5. Medical History</h2>
+<table class="kvgrid">
+  <tr><td class="k">Diseases</td><td>{{ history.diseases or '—' }}</td></tr>
+  <tr><td class="k">Allergies</td><td>{{ history.allergies or '—' }}</td></tr>
+  <tr><td class="k">Surgeries</td><td>{{ history.surgeries or '—' }}</td></tr>
+</table>
+
+<h2>6. Current Medicines</h2>
+{% if medicines %}
+<table>
+  <tr><th>Medicine</th><th>Dose</th><th>Schedule</th></tr>
+  {% for m in medicines %}
+  <tr><td>{{ m.name }}</td><td>{{ m.dose or '—' }}</td><td>{{ m.schedule or '—' }}</td></tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="empty">No current medicines on file. (Populated when the medicine-reminders slice lands.)</p>
+{% endif %}
+
+<h2>7. Doctor's Observation</h2>
+{% if observations %}
+{% for n in observations %}
+<p>{{ n.body }} <span class="meta">— {{ n.recorded_at_str }}</span></p>
+{% endfor %}
+{% else %}
+<p class="empty">No observations recorded.</p>
+{% endif %}
+
+<h2>8. Treatment Given On Site</h2>
+{% if treatments %}
+{% for n in treatments %}
+<p>{{ n.body }}{% if n.advice_given %} &nbsp;|&nbsp; Advice: {{ n.advice_given }}{% endif %}
+<span class="meta">— {{ n.recorded_at_str }}</span></p>
+{% endfor %}
+{% else %}
+<p class="empty">No on-site treatment recorded.</p>
+{% endif %}
+
+<h2>9. Reason for Escalation</h2>
+{% if escalations %}
+{% for n in escalations %}
+<p>{{ n.body }} <span class="meta">— {{ n.recorded_at_str }}</span></p>
+{% endfor %}
+{% else %}
+<p class="empty">No escalation reason recorded.</p>
+{% endif %}
+
+<h2>10. Family Contact</h2>
+{% if family.name or family.phone %}
+<p>{{ family.name or 'Primary contact' }} &nbsp;·&nbsp; {{ family.phone or '—' }}
+{% if family.relation %} ({{ family.relation }}){% endif %}</p>
+{% else %}
+<p class="empty">No primary contact on file.</p>
+{% endif %}
+
+<h2>11. Attached Records</h2>
+{% if records %}
+<table>
+  <tr><th>File</th><th>Type</th><th>Uploaded</th></tr>
+  {% for r in records %}
+  <tr><td>{{ r.file_name }}</td><td>{{ r.record_type }}</td><td>{{ r.uploaded_at_str }}</td></tr>
+  {% endfor %}
+</table>
+<p class="meta">Each record is available via a short-lived (≤15 min) signed link in the dashboard; links are not embedded in this PDF for safety.</p>
+{% else %}
+<p class="empty">No medical records attached.</p>
+{% endif %}
+
+<div class="footer">
+  <p><strong>{{ doctor.name }}</strong> &nbsp;·&nbsp; Reg. No. {{ doctor.registration_number }}</p>
+  <p>Hospital destination: {{ hospital_destination }}</p>
+  <p>Signature: <span class="sigline"></span></p>
+  <p class="meta">This document does not replace emergency hospital care. Generated by the residential emergency platform — for clinician use only.</p>
+</div>
+
+</body>
+</html>
