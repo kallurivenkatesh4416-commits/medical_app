@@ -35,6 +35,31 @@ type VitalsDraft = {
   temperature_c: string;
 };
 
+type AdherenceTotals = {
+  taken: number;
+  skipped: number;
+  missed: number;
+  scheduled_slots: number;
+};
+
+type AdherenceSchedule = {
+  schedule_id: string;
+  name: string;
+  frequency: string;
+  active: boolean;
+  taken: number;
+  skipped: number;
+  missed: number;
+  scheduled_slots: number;
+};
+
+type Adherence = {
+  resident_id: string;
+  window_days: number;
+  totals: AdherenceTotals;
+  schedules: AdherenceSchedule[];
+};
+
 const emptyVitals: VitalsDraft = {
   blood_pressure_systolic: "",
   blood_pressure_diastolic: "",
@@ -72,6 +97,12 @@ export default function App() {
   const [dispatchEmail, setDispatchEmail] = useState("");
   const [dispatchWhatsapp, setDispatchWhatsapp] = useState("");
   const [handoverStatus, setHandoverStatus] = useState("");
+  // Slice 9 — per-resident adherence view. The doctor pastes a resident id
+  // (no resident search yet — that lands with the admin dashboard slice).
+  const [adherenceResidentId, setAdherenceResidentId] = useState("");
+  const [adherenceDays, setAdherenceDays] = useState("7");
+  const [adherenceResult, setAdherenceResult] = useState<Adherence | null>(null);
+  const [adherenceStatus, setAdherenceStatus] = useState("");
 
   const activeCount = alerts.length;
   const newest = useMemo(() => alerts[0], [alerts]);
@@ -237,6 +268,25 @@ export default function App() {
       .map((d) => `${d.channel}: ${d.status}${d.error ? ` (${d.error})` : ""}`)
       .join(" · ");
     setHandoverStatus(summary || "Dispatched");
+  }
+
+  async function loadAdherence(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!token.trim() || !adherenceResidentId.trim()) return;
+    setAdherenceStatus("Loading");
+    setAdherenceResult(null);
+    const days = Number.parseInt(adherenceDays, 10) || 7;
+    const resp = await fetch(
+      `${apiBaseClean}/api/v1/residents/${adherenceResidentId.trim()}/medicines/adherence?days=${days}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (!resp.ok) {
+      setAdherenceStatus(`Adherence read failed (${resp.status})`);
+      return;
+    }
+    const data = (await resp.json()) as Adherence;
+    setAdherenceResult(data);
+    setAdherenceStatus(`Loaded (${data.window_days}-day window)`);
   }
 
   async function refreshHandoverLink() {
@@ -504,6 +554,68 @@ export default function App() {
         </section>
       ) : null}
 
+      <section style={styles.workspace}>
+        <p style={styles.kicker}>Medicine Adherence</p>
+        <form onSubmit={loadAdherence} style={styles.formGrid}>
+          <label style={styles.field}>
+            Resident ID
+            <input
+              value={adherenceResidentId}
+              onChange={(event) => setAdherenceResidentId(event.target.value)}
+              style={styles.input}
+              placeholder="paste resident UUID"
+            />
+          </label>
+          <label style={styles.field}>
+            Window (days)
+            <input
+              value={adherenceDays}
+              onChange={(event) => setAdherenceDays(event.target.value)}
+              style={styles.input}
+              inputMode="numeric"
+            />
+          </label>
+          <button type="submit" style={styles.actionButton}>
+            Load Adherence
+          </button>
+        </form>
+        {adherenceStatus ? <p style={styles.muted}>{adherenceStatus}</p> : null}
+        {adherenceResult ? (
+          <div>
+            <p style={styles.muted}>
+              Totals — taken {adherenceResult.totals.taken} · skipped{" "}
+              {adherenceResult.totals.skipped} · missed{" "}
+              {adherenceResult.totals.missed} · scheduled{" "}
+              {adherenceResult.totals.scheduled_slots}
+            </p>
+            <table style={styles.adherenceTable}>
+              <thead>
+                <tr>
+                  <th style={styles.adherenceCell}>Medicine</th>
+                  <th style={styles.adherenceCell}>Frequency</th>
+                  <th style={styles.adherenceCell}>Active</th>
+                  <th style={styles.adherenceCell}>Taken</th>
+                  <th style={styles.adherenceCell}>Skipped</th>
+                  <th style={styles.adherenceCell}>Missed</th>
+                </tr>
+              </thead>
+              <tbody>
+                {adherenceResult.schedules.map((row) => (
+                  <tr key={row.schedule_id}>
+                    <td style={styles.adherenceCell}>{row.name}</td>
+                    <td style={styles.adherenceCell}>{row.frequency.replaceAll("_", " ")}</td>
+                    <td style={styles.adherenceCell}>{row.active ? "yes" : "no"}</td>
+                    <td style={styles.adherenceCell}>{row.taken}</td>
+                    <td style={styles.adherenceCell}>{row.skipped}</td>
+                    <td style={styles.adherenceCell}>{row.missed}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+      </section>
+
       <footer style={styles.footer}>{disclaimer}</footer>
     </main>
   );
@@ -675,6 +787,17 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#1f6f5b",
     fontWeight: 700,
     textDecoration: "underline",
+  },
+  adherenceTable: {
+    width: "100%",
+    borderCollapse: "collapse",
+    marginTop: 6,
+  },
+  adherenceCell: {
+    textAlign: "left",
+    padding: "6px 8px",
+    borderBottom: "1px solid #d6dae2",
+    fontSize: 13,
   },
   footer: { maxWidth: 1120, margin: "18px auto 0", color: "#596273", fontSize: 13 },
 };

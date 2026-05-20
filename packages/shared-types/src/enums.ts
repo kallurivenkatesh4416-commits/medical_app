@@ -93,6 +93,37 @@ export type HandoverDispatchChannel =
   (typeof HandoverDispatchChannel)[keyof typeof HandoverDispatchChannel];
 
 /**
+ * Slice 9 — how often a prescribed medicine recurs. Stable wire token (hits
+ * DB and the mobile reminders scheduler). `as_needed` (PRN) is informational
+ * for adherence counts and is never auto-marked as missed.
+ */
+export const MedicineFrequency = {
+  ONCE_DAILY: "once_daily",
+  TWICE_DAILY: "twice_daily",
+  THRICE_DAILY: "thrice_daily",
+  FOUR_TIMES_DAILY: "four_times_daily",
+  WEEKLY: "weekly",
+  AS_NEEDED: "as_needed",
+} as const;
+export type MedicineFrequency =
+  (typeof MedicineFrequency)[keyof typeof MedicineFrequency];
+
+/**
+ * Slice 9 — per-scheduled-dose log status. `scheduled` is the transient
+ * upcoming state visible only on the resident's today view; `missed` is
+ * computed live from schedule + log when the doctor reads adherence
+ * (no scheduler yet).
+ */
+export const MedicineDoseStatus = {
+  SCHEDULED: "scheduled",
+  TAKEN: "taken",
+  SKIPPED: "skipped",
+  MISSED: "missed",
+} as const;
+export type MedicineDoseStatus =
+  (typeof MedicineDoseStatus)[keyof typeof MedicineDoseStatus];
+
+/**
  * Targets on the mobile 60s failed-alert fallback sheet (PLAN.md Slice 6).
  * Every tap records a `case_events` row with the chosen channel.
  */

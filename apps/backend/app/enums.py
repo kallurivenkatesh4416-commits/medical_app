@@ -69,6 +69,40 @@ class HandoverDispatchChannel(StrEnum):
     WHATSAPP = "whatsapp"
 
 
+class MedicineFrequency(StrEnum):
+    """Slice 9: how often a prescribed medicine recurs. The value is a stable
+    wire token (it hits the DB and the mobile notifications scheduler), not a
+    display string. ``as_needed`` (PRN) means no fixed times — adherence
+    counts treat it as informational only, not missed.
+    """
+
+    ONCE_DAILY = "once_daily"
+    TWICE_DAILY = "twice_daily"
+    THRICE_DAILY = "thrice_daily"
+    FOUR_TIMES_DAILY = "four_times_daily"
+    WEEKLY = "weekly"
+    AS_NEEDED = "as_needed"
+
+
+class MedicineDoseStatus(StrEnum):
+    """Slice 9: per-scheduled-dose log status.
+
+    - ``scheduled``: the slot exists on the schedule but the resident has not
+      yet acted on it (transient — only used by the resident's "today" view
+      to differentiate upcoming from acted-on doses).
+    - ``taken``: resident tapped "I took it" within (or after) the slot.
+    - ``skipped``: resident explicitly tapped "Skip".
+    - ``missed``: auto-marked when the slot is more than the configured grace
+      window in the past with no resident action. The auto-marker is not yet
+      a scheduler; for Slice 9 the missed count is computed live from the
+      schedule + log when the doctor reads adherence."""
+
+    SCHEDULED = "scheduled"
+    TAKEN = "taken"
+    SKIPPED = "skipped"
+    MISSED = "missed"
+
+
 class NotificationStatus(StrEnum):
     QUEUED = "queued"
     # Transient claim: one deliverer atomically moves queued -> sending before
@@ -155,3 +189,9 @@ class AuditAction(StrEnum):
     HANDOVER_LINK_ISSUED = "handover_link_issued"
     HANDOVER_DISPATCHED = "handover_dispatched"
     HANDOVER_DOWNLOADED = "handover_downloaded"
+    # Slice 9 — medicine reminders.
+    MEDICINE_SCHEDULE_CREATED = "medicine_schedule_created"
+    MEDICINE_SCHEDULE_UPDATED = "medicine_schedule_updated"
+    MEDICINE_SCHEDULE_LIST = "medicine_schedule_list"
+    MEDICINE_DOSE_LOGGED = "medicine_dose_logged"
+    MEDICINE_ADHERENCE_READ = "medicine_adherence_read"

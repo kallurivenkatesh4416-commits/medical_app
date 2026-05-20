@@ -53,6 +53,14 @@
 | GET | `/api/v1/handover/{handover_id}/link` | 8 | doctor/nurse/ops; mints a fresh ≤15-min signed link without re-rendering; audited |
 | POST | `/api/v1/handover/{handover_id}/dispatch` | 8 | doctor-only; sends the signed link by email (Mailhog dev / SMTP live) and/or WhatsApp (Twilio); one channel failing must not block the other; persists one `handover_dispatches` row per channel |
 | GET | `/api/v1/handover/file/{token}` | 8 | capability-token-gated PDF download (token type distinct from `record_url`); 401 on invalid/expired; 404 on missing; audited |
+| POST | `/api/v1/me/medicines/schedules` | 9 | resident creates own medicine schedule; gated by `MEDICINE_REMINDER_NOTIFICATIONS` consent (live state); `times_of_day` count must match `frequency`; audited |
+| GET | `/api/v1/me/medicines/schedules` | 9 | resident lists own (active + recently stopped) schedules; audited |
+| POST | `/api/v1/me/medicines/schedules/{id}/deactivate` | 9 | resident stops own schedule; mobile cancels local reminders on next sync |
+| POST | `/api/v1/me/medicines/doses` | 9 | resident logs `taken` / `skipped` for a slot; unique on `(schedule_id, scheduled_for)` so a network-retry returns the existing row, not 409 |
+| POST | `/api/v1/residents/{resident_id}/medicines/schedules` | 9 | doctor-only; creates schedule on behalf of resident; same consent gate + tenant isolation |
+| GET | `/api/v1/residents/{resident_id}/medicines/schedules` | 9 | doctor / nurse / ops list; PHI-blocked for builder/security; `EMERGENCY_SHARE_WITH_DOCTOR` consent-gated; audited |
+| POST | `/api/v1/residents/{resident_id}/medicines/schedules/{id}/deactivate` | 9 | doctor stops a schedule |
+| GET | `/api/v1/residents/{resident_id}/medicines/adherence?days=N` | 9 | doctor / nurse / ops aggregate adherence (`taken`/`skipped`/`missed`/`scheduled_slots`); `missed` computed live from schedule + logs (no scheduler yet); 1–90 day window |
 
 Auth: `Authorization: Bearer <access>`. Access tokens are short-lived JWTs;
 refresh tokens are opaque, stored hashed, rotated on every use.

@@ -69,6 +69,21 @@ Then:
   the Twilio gateway (stub in dev, live with `PROVIDER_MODE=live` plus
   `TWILIO_WHATSAPP_FROM`). Without that var, the WhatsApp channel records
   a failed dispatch with error `RuntimeError`.
+- Slice 9: medicine reminders. The resident creates a schedule from the
+  mobile app (`POST /api/v1/me/medicines/schedules`) which requires the
+  live `MEDICINE_REMINDER_NOTIFICATIONS` consent. The mobile app keeps a
+  list of device-local reminders in sync with the active schedules
+  (no FCM — see `apps/mobile/lib/medicine.dart`); the production
+  `flutter_local_notifications` adapter is a thin wrapper around the
+  `LocalReminderScheduler` seam and is installed at startup once the
+  platform-native channels are configured. Resident self-only:
+  `POST /api/v1/me/medicines/doses` records `taken` / `skipped` per slot;
+  a network-flake retry returns the existing row (unique index on
+  `schedule_id, scheduled_for`). Doctors and nurses read aggregate
+  adherence (`GET /api/v1/residents/{id}/medicines/adherence?days=N`,
+  `EMERGENCY_SHARE_WITH_DOCTOR` consent-gated, PHI-blocked for
+  builder/security). The handover PDF §6 "Current Medicines" section is
+  populated from active schedules automatically.
 
 ### PDF renderer — WeasyPrint → xhtml2pdf substitution
 
@@ -107,10 +122,13 @@ real SMS provider. Seeded demo phones are `+15550000001`…`+15550000009`
 See `.env.example` (annotated). Provider keys (Twilio/FCM/AWS) are only needed from
 the slice that uses them; default `PROVIDER_MODE=stub` needs no external accounts.
 
-_Status: Slices 1-8 cover backend foundation, auth/RBAC/audit,
+_Status: Slices 1-9 cover backend foundation, auth/RBAC/audit,
 onboarding/consent/profile, medical-record upload/list/link, the emergency
 happy path with dashboard feed, emergency hardening (3-channel fan-out,
 on-call resolution, 60s backup escalation, mobile offline retry + fallback
-sheet), case lifecycle/vitals/notes/aggregate KPIs, and hospital handover
-PDF (xhtml2pdf, 15-minute signed link, email + WhatsApp dispatch). Live
-Twilio/FCM/WhatsApp + live SMTP are verified with operator keys._
+sheet), case lifecycle/vitals/notes/aggregate KPIs, hospital handover
+PDF (xhtml2pdf, 15-minute signed link, email + WhatsApp dispatch), and
+medicine reminders (resident schedules, device-local reminders, taken/
+skipped logs, doctor adherence view, handover §6 wire-in). Live Twilio
+(SMS / voice / WhatsApp) + live SMTP are wired and configured per
+`.env.example`; live FCM push is a separate operator-keys task._

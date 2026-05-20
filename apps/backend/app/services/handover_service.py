@@ -48,6 +48,7 @@ from app.security.jwt import (
     create_handover_url_token,
     decode_handover_url_token,
 )
+from app.services import medicines_service
 from app.services.audit import record_audit
 from app.services.auth_service import AuthError
 from app.services.email import get_email_gateway
@@ -631,9 +632,18 @@ def _aggregate(
             "allergies": ", ".join(profile.allergies) if profile and profile.allergies else None,
             "surgeries": ", ".join(profile.surgeries) if profile and profile.surgeries else None,
         },
-        # Slice 9 wires real medicine rows; the template renders the section
-        # header either way so the §8 layout never shifts.
-        "medicines": [],
+        # §6 Current Medicines — populated from active medicine_schedules for
+        # the resident (Slice 9 wire-in). The template iterates `m.name` /
+        # `m.dose` / `m.schedule`; keep those field names if either side
+        # changes. An empty list still renders the section header with a
+        # "no current medicines on file" placeholder.
+        "medicines": (
+            [_medicine_dict(s) for s in medicines_service.active_schedules_for_resident(
+                session, resident_id=resident.id
+            )]
+            if resident is not None
+            else []
+        ),
         "observations": [_note_dict(n) for n in observations],
         "treatments": [_note_dict(n) for n in treatments],
         "escalations": [_note_dict(n) for n in escalations],
@@ -697,6 +707,24 @@ def _record_dict(r: MedicalRecord) -> dict:
         "file_name": r.file_name,
         "record_type": r.record_type,
         "uploaded_at_str": r.created_at.strftime("%Y-%m-%d"),
+    }
+
+
+def _medicine_dict(s) -> dict:  # noqa: ANN001 - MedicineSchedule
+    """Render a MedicineSchedule for the handover §6 template. The
+    template expects `name` / `dose` / `schedule` — we fold frequency +
+    times_of_day into a single human-readable `schedule` string so the
+    PDF stays compact."""
+    times = ", ".join(s.times_of_day) if s.times_of_day else None
+    parts = [s.frequency.replace("_", " ")]
+    if times:
+        parts.append(f"at {times}")
+    if s.instructions:
+        parts.append(s.instructions)
+    return {
+        "name": s.name,
+        "dose": s.dose or "",
+        "schedule": " — ".join(parts),
     }
 
 

@@ -94,4 +94,22 @@
   short-lived signed link (token type `handover_url`, distinct from
   `record_url`).
 
+- **Slice 9** (migration `0009_medicine_reminders`): `medicine_schedules`
+  holds a resident's prescribed medicine + recurrence — project/resident
+  scoped, `prescribed_by` (resident self or doctor), `name`, `dose`,
+  `instructions`, `frequency` (`MedicineFrequency`), `times_of_day` (JSON
+  list of `HH:MM`), `start_date`/`end_date`, `active` flag. The mobile app
+  reads this list and schedules **device-local** notifications — no FCM is
+  involved (Slice 9 has no external-key dependency). `medicine_dose_logs`
+  records one row per resident-acted-on dose: `(schedule_id, scheduled_for)`
+  carries a UNIQUE INDEX so a network-flake retry maps to the existing row
+  instead of double-logging, `status` ∈ `MedicineDoseStatus` (resident logs
+  `taken` / `skipped`; `missed` is computed live from schedule + logs at
+  adherence-read time — no scheduler yet). Both tables are written through
+  the Slice 3 consent gate (`MEDICINE_REMINDER_NOTIFICATIONS` for create,
+  `EMERGENCY_SHARE_WITH_DOCTOR` for staff reads) and every mutation writes
+  to `audit_log`. The Slice 8 handover PDF §6 "Current Medicines" section
+  is now populated from this table (the §8 placeholder is gone when any
+  active schedule exists).
+
 _Schema continues to grow per slice._

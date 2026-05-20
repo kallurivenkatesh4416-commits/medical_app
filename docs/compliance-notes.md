@@ -250,6 +250,40 @@
   reaper — same "lose one notification, never double-send" tradeoff as
   notification_attempts, tracked in `docs/open-questions.md`.
 
+## Slice 9 implementation notes (medicine reminders)
+
+- Schedule creation is gated by **live** `MEDICINE_REMINDER_NOTIFICATIONS`
+  consent on the resident — declining at onboarding, or revoking later,
+  blocks the very next create with `consent_required` (no schedule row is
+  persisted). Same `assert_consent` helper as Slice 8's hospital-consent
+  gate.
+- Staff schedule reads + adherence reads are gated by
+  `EMERGENCY_SHARE_WITH_DOCTOR` (same gate Slice 4 record reads use). PHI
+  surfaces are PHI-blocked for `builder_admin` / `security_desk` and
+  tenant-isolated (404 cross-project, no existence leak).
+- Dose logs are **resident-self-only**: only the resident knows whether
+  they actually took the dose. A doctor recording a dose on the resident's
+  behalf would be a misleading medical record. A doctor / nurse hitting
+  `/me/medicines/doses` gets 403 at the RBAC layer.
+- `(schedule_id, scheduled_for)` is uniquely indexed at the DB so a
+  network-flake retry on the same slot returns the existing log row
+  rather than 409 — the mobile app can safely re-POST without state
+  bookkeeping. The service does a pre-check first (returns existing) and
+  has an `IntegrityError` race net for genuinely concurrent inserts.
+- `missed` doses are **not stored** — they are computed live at
+  adherence-read time from the schedule's projected slots minus the logged
+  rows, with a 1-hour grace window so a still-pending slot from today is
+  not counted as missed. A future hardening item adds a scheduler that
+  materializes missed rows (tracked in `docs/open-questions.md`); the
+  contract for the doctor's view is the same either way.
+- Reminders are **device-local** (`flutter_local_notifications`-style;
+  see `apps/mobile/lib/medicine.dart`). No FCM dependency — Slice 9 has
+  no operator-key requirement per PLAN.md. The platform-native adapter is
+  a separate task; the mobile UI works against an in-memory stub today.
+- Slice 8 handover PDF §6 now reflects active schedules. The
+  `EMERGENCY_SHARE_WITH_HOSPITAL` gate Slice 8 introduced still controls
+  whether the handover (and thus the medicine list) leaves the platform.
+
 ## Open questions — `[NEEDS_LEGAL_REVIEW]`
 
 1. `[NEEDS_LEGAL_REVIEW]` DPDP cross-border data: acceptable AWS S3 region for
