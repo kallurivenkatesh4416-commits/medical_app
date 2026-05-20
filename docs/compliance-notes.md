@@ -329,6 +329,18 @@
   migration, manual repair script) the doctor's view still satisfies
   `taken + skipped ≤ scheduled_slots`. Two layers, same invariant.
 
+### Slice 9 review #3 fix — tz-aware `scheduled_for` payloads
+
+- **Naive-UTC normalisation at the dose-log entry point.** Pydantic
+  parses ISO strings such as `"2026-05-19T08:00:00Z"` or
+  `"2026-05-19T13:30:00+05:30"` into offset-aware `datetime` objects;
+  the repo convention (see `app/models/base.utcnow`) is naive UTC. The
+  service now converts any offset-aware `scheduled_for` to naive UTC at
+  the top of `log_own_dose` via `_to_naive_utc`, so the future-dose
+  guard's subtraction, the slot-match check, the unique-index lookup,
+  and the persisted DB value all speak the same shape. Already-naive
+  inputs (assumed UTC) pass through unchanged.
+
 ## Open questions — `[NEEDS_LEGAL_REVIEW]`
 
 1. `[NEEDS_LEGAL_REVIEW]` DPDP cross-border data: acceptable AWS S3 region for

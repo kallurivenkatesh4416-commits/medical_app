@@ -851,6 +851,96 @@ def test_dose_log_rejects_future_scheduled_for(
     }
 
 
+def test_dose_log_accepts_timezone_aware_scheduled_for(
+    client: TestClient, project: Project, session: Session
+) -> None:
+    """Pydantic parses ISO strings with `Z` or a fixed offset as
+    offset-aware datetimes. The repo's DateTime columns are naive UTC
+    (see `app/models/base.utcnow`), so the new future-dose guard
+    `data.scheduled_for - utcnow()` would TypeError on tz-aware input.
+    The service now normalises to naive UTC at entry — both shapes must
+    land cleanly as 200, with the persisted row in the canonical naive
+    form."""
+    from datetime import UTC, timezone
+
+    resident_token, _, _ = _onboard(client, project, session, "+15559990640")
+    headers = {"Authorization": f"Bearer {resident_token}"}
+    yesterday = date.today() - timedelta(days=1)
+    schedule = client.post(
+        "/api/v1/me/medicines/schedules",
+        # twice-daily so we can hit two different slots from the same
+        # case without colliding on the unique (schedule_id, slot) index.
+        json=_schedule_body(
+            start_date=yesterday.isoformat(),
+            frequency=MedicineFrequency.TWICE_DAILY.value,
+            times_of_day=["08:00", "20:00"],
+        ),
+        headers=headers,
+    ).json()
+
+    # Branch 1: `Z` suffix → tzinfo=UTC after Pydantic parse.
+    z_slot_naive = datetime.combine(yesterday, datetime.min.time()).replace(hour=8)
+    z_payload = z_slot_naive.isoformat() + "Z"
+    z_resp = client.post(
+        "/api/v1/me/medicines/doses",
+        json={
+            "schedule_id": schedule["id"],
+            "scheduled_for": z_payload,
+            "status": MedicineDoseStatus.TAKEN.value,
+        },
+        headers=headers,
+    )
+    assert z_resp.status_code == 200, z_resp.text
+    # Branch 2: fixed offset (IST = UTC+05:30) — the service must convert
+    # 20:00+05:30 to 14:30 UTC and reject it as off-slot (slots are
+    # declared in UTC). Conversely a 20:00 IST that maps to 14:30 UTC
+    # would not be a slot — so we send a UTC time tagged as IST to
+    # produce a non-08:00 / non-20:00 UTC time and assert the slot check
+    # correctly rejects it, proving the conversion happened.
+    ist = timezone(timedelta(hours=5, minutes=30))
+    ist_off_payload = datetime.combine(yesterday, datetime.min.time()).replace(
+        hour=20, tzinfo=ist
+    ).isoformat()
+    ist_off_resp = client.post(
+        "/api/v1/me/medicines/doses",
+        json={
+            "schedule_id": schedule["id"],
+            "scheduled_for": ist_off_payload,
+            "status": MedicineDoseStatus.TAKEN.value,
+        },
+        headers=headers,
+    )
+    assert ist_off_resp.status_code == 422, ist_off_resp.text
+    assert ist_off_resp.json()["error"]["code"] == "invalid_dose_slot"
+    # Branch 3: a properly-aligned IST timestamp whose UTC translation
+    # IS a slot (20:00 UTC == 01:30 IST next day → date+1 in IST, but
+    # the same naive UTC slot the schedule declares). Sanity: 20:00 UTC
+    # expressed as IST 01:30 next day must persist as the original
+    # 20:00 UTC slot, not the IST wall-clock.
+    target_utc = datetime.combine(yesterday, datetime.min.time()).replace(hour=20)
+    ist_aware = target_utc.replace(tzinfo=UTC).astimezone(ist)
+    ist_on_resp = client.post(
+        "/api/v1/me/medicines/doses",
+        json={
+            "schedule_id": schedule["id"],
+            "scheduled_for": ist_aware.isoformat(),
+            "status": MedicineDoseStatus.TAKEN.value,
+        },
+        headers=headers,
+    )
+    assert ist_on_resp.status_code == 200, ist_on_resp.text
+    # Confirm both successful rows persisted with naive-UTC values.
+    rows = sorted(
+        session.exec(select(MedicineDoseLog)).all(),
+        key=lambda r: r.scheduled_for,
+    )
+    assert len(rows) == 2
+    assert rows[0].scheduled_for == z_slot_naive
+    assert rows[0].scheduled_for.tzinfo is None
+    assert rows[1].scheduled_for == target_utc
+    assert rows[1].scheduled_for.tzinfo is None
+
+
 def test_adherence_filters_out_stray_future_log_row(
     client: TestClient, project: Project, session: Session, login
 ) -> None:

@@ -30,7 +30,7 @@ in open-questions.md).
 
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
@@ -282,6 +282,12 @@ def log_own_dose(
     the existing row instead of double-logging."""
     if user.role != Role.RESIDENT.value:
         raise AuthError(403, "resident_required", "Only the resident can log doses.")
+    # Normalise tz-aware payloads (Pydantic happily parses `"...Z"` or
+    # `"+05:30"` ISO strings) to the repo's naive-UTC convention so every
+    # downstream check — future-dose guard, slot match, unique-index
+    # lookup, and the persisted row itself — speak the same shape. See
+    # `_to_naive_utc` for the rationale.
+    data.scheduled_for = _to_naive_utc(data.scheduled_for)
     if data.status not in {MedicineDoseStatus.TAKEN, MedicineDoseStatus.SKIPPED}:
         raise AuthError(
             422,
@@ -591,6 +597,23 @@ def _is_hhmm(value: str) -> bool:
         return 0 <= int(hour) <= 23 and 0 <= int(minute) <= 59
     except (ValueError, AttributeError):
         return False
+
+
+def _to_naive_utc(dt: datetime) -> datetime:
+    """The repo's DateTime columns are tz-naive UTC (see app/models/base.py
+    `utcnow()`). Pydantic, however, parses ISO strings like
+    ``"2026-05-19T08:00:00Z"`` or ``"2026-05-19T13:30:00+05:30"`` into
+    offset-aware datetimes. Mixing the two in the future-dose guard
+    (``data.scheduled_for - utcnow()``) raises ``TypeError`` — and the
+    naive ``.date()`` / ``.strftime("%H:%M")`` slot match against an
+    aware datetime would silently use the local-tz date, not UTC.
+
+    Normalise here so every downstream check and the persisted DB value
+    use the same naive-UTC convention. Already-naive inputs are
+    assumed-UTC (the existing convention) and returned unchanged."""
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone(UTC).replace(tzinfo=None)
 
 
 def _has_consent(
