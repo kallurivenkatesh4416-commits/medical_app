@@ -47,13 +47,28 @@ Then:
   doctor generates a §8-complete PDF (`POST /api/v1/emergency/alerts/{id}/handover`),
   receives a 15-minute signed link, can refresh the link
   (`GET /api/v1/handover/{id}/link`), and can dispatch it by email and/or
-  WhatsApp (`POST /api/v1/handover/{id}/dispatch`). The signed file route
-  (`GET /api/v1/handover/file/{token}`) is the only PHI surface that is
-  capability-token-gated rather than auth-gated; the token type is distinct
-  from the records token so a leaked record link cannot fetch a handover.
-  Email lands via Mailhog (UI on port 8025) in dev; WhatsApp is routed
-  through the Twilio gateway (stub in dev, live with `PROVIDER_MODE=live`
-  plus `TWILIO_WHATSAPP_FROM`).
+  WhatsApp (`POST /api/v1/handover/{id}/dispatch`). The shape of the signed
+  download URL is provider-mode dependent:
+  - `PROVIDER_MODE=stub` (dev/CI): the link is a backend-proxied
+    capability link, `GET /api/v1/handover/file/{token}` — the only PHI
+    surface that is capability-token-gated rather than auth-gated. The
+    token type is distinct from the records token so a leaked record link
+    cannot fetch a handover.
+  - `PROVIDER_MODE=live`: the link is a native S3 presigned GET issued by
+    the StorageGateway, identical to how Slice 4 records work in live
+    mode. The backend `/handover/file/{token}` route is not used in live;
+    `S3StorageGateway.get_bytes` raises by design (live storage is never
+    proxied). `HANDOVER_LINK_ISSUED` is audited at issue time either way.
+
+  Hospital sharing is gated by the resident's `EMERGENCY_SHARE_WITH_HOSPITAL`
+  consent on every generate / link refresh / dispatch — a revocation between
+  generate and dispatch is honoured immediately.
+
+  Email lands via Mailhog (UI on port 8025) in dev; live SMTP needs
+  `SMTP_USERNAME`/`SMTP_PASSWORD`/`SMTP_USE_TLS`. WhatsApp routes through
+  the Twilio gateway (stub in dev, live with `PROVIDER_MODE=live` plus
+  `TWILIO_WHATSAPP_FROM`). Without that var, the WhatsApp channel records
+  a failed dispatch with error `RuntimeError`.
 
 ### PDF renderer — WeasyPrint → xhtml2pdf substitution
 
