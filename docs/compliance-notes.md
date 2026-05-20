@@ -312,6 +312,23 @@
   they declare any `times_of_day` (`as_needed_no_slots`) so the PRN
   contract stays honest end-to-end.
 
+### Slice 9 review #2 fix — future-dated dose logs
+
+- **Future-dose guard at write time.** `log_own_dose` rejects any
+  `scheduled_for` that is more than `FUTURE_DOSE_TOLERANCE_SECONDS` (120
+  s of mobile clock-skew tolerance) in the server's future, with 422
+  `future_dose_slot`. Without this guard a schedule starting tomorrow
+  could accept a `taken` log for tomorrow's 08:00 slot today, yielding
+  `taken: 1, scheduled_slots: 0` in the doctor's adherence view (the
+  slot projector only goes up to "now"). Applies to every frequency
+  including `as_needed` — a PRN intake that has not happened yet is
+  incoherent.
+- **Defense in depth on the adherence read.** The adherence query also
+  filters `MedicineDoseLog.scheduled_for <= now`, so even if a stray
+  future row somehow lands in the DB (clock-skew slip, future
+  migration, manual repair script) the doctor's view still satisfies
+  `taken + skipped ≤ scheduled_slots`. Two layers, same invariant.
+
 ## Open questions — `[NEEDS_LEGAL_REVIEW]`
 
 1. `[NEEDS_LEGAL_REVIEW]` DPDP cross-border data: acceptable AWS S3 region for

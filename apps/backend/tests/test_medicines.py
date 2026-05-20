@@ -316,16 +316,18 @@ def test_resident_logs_taken_and_duplicate_log_returns_same_row(
 ) -> None:
     resident_token, _, _ = _onboard(client, project, session, "+15559990520")
     headers = {"Authorization": f"Bearer {resident_token}"}
+    # Pin the schedule's start_date to yesterday and log against
+    # yesterday's 08:00 slot — this is the schedule's real slot, in the
+    # past (so the future-dose guard passes), and matches the
+    # `times_of_day` ("08:00") so `_is_valid_dose_slot` returns True
+    # regardless of what hour the suite runs at.
+    yesterday = date.today() - timedelta(days=1)
     schedule = client.post(
         "/api/v1/me/medicines/schedules",
-        json=_schedule_body(),
+        json=_schedule_body(start_date=yesterday.isoformat()),
         headers=headers,
     ).json()
-
-    # Use the schedule's real "08:00" slot on today's date so the new
-    # slot-integrity check accepts the timestamp (a random utcnow() value
-    # would be rejected by `invalid_dose_slot`).
-    slot_dt = datetime.combine(date.today(), datetime.min.time()).replace(hour=8)
+    slot_dt = datetime.combine(yesterday, datetime.min.time()).replace(hour=8)
     slot = slot_dt.isoformat()
     first = client.post(
         "/api/v1/me/medicines/doses",
@@ -639,14 +641,19 @@ def test_dose_log_rejects_off_slot_timestamp(
     those with 422 `invalid_dose_slot`."""
     resident_token, _, _ = _onboard(client, project, session, "+15559990601")
     headers = {"Authorization": f"Bearer {resident_token}"}
+    # Pin the schedule's start_date to yesterday so both off-slot
+    # (`12:34`) and on-slot (`08:00`) timestamps are deterministically in
+    # the past — otherwise the future-dose guard could fire first at
+    # certain CI clock times and mask the off-slot path under test.
+    yesterday = date.today() - timedelta(days=1)
     created = client.post(
         "/api/v1/me/medicines/schedules",
-        json=_schedule_body(),  # once_daily at 08:00
+        json=_schedule_body(start_date=yesterday.isoformat()),  # once_daily at 08:00
         headers=headers,
     )
     sched_id = created.json()["id"]
 
-    off_slot = datetime.combine(date.today(), datetime.min.time()).replace(hour=12, minute=34)
+    off_slot = datetime.combine(yesterday, datetime.min.time()).replace(hour=12, minute=34)
     resp = client.post(
         "/api/v1/me/medicines/doses",
         json={
@@ -787,3 +794,108 @@ def test_schedule_rejects_as_needed_with_fixed_times_of_day(
     )
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "as_needed_no_slots"
+
+
+# --------------------------------------------------------------------------- #
+# 7. Review #2 — future-dated dose logs corrupt adherence                     #
+# --------------------------------------------------------------------------- #
+
+
+def test_dose_log_rejects_future_scheduled_for(
+    client: TestClient, project: Project, session: Session, login
+) -> None:
+    """Repro of the original review finding: a schedule starting tomorrow
+    that accepts a `taken` log for tomorrow's 08:00 slot today would
+    yield `taken: 1, scheduled_slots: 0` (adherence projects slots only
+    up to "now"). The future-dose guard rejects it at write time with
+    422 `future_dose_slot`. Adherence stays sound: nothing logged, no
+    slots projected, no inflation."""
+    resident_token, resident, _ = _onboard(client, project, session, "+15559990630")
+    headers = {"Authorization": f"Bearer {resident_token}"}
+    doctor = _make_user(session, project, Role.DOCTOR)
+
+    tomorrow = date.today() + timedelta(days=1)
+    created = client.post(
+        "/api/v1/me/medicines/schedules",
+        json=_schedule_body(start_date=tomorrow.isoformat()),
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    sched_id = created.json()["id"]
+
+    future_slot = datetime.combine(tomorrow, datetime.min.time()).replace(hour=8)
+    resp = client.post(
+        "/api/v1/me/medicines/doses",
+        json={
+            "schedule_id": sched_id,
+            "scheduled_for": future_slot.isoformat(),
+            "status": MedicineDoseStatus.TAKEN.value,
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "future_dose_slot"
+    assert session.exec(select(MedicineDoseLog)).all() == []
+
+    # And the doctor's adherence view stays at zero across the board.
+    adherence = client.get(
+        f"/api/v1/residents/{resident.id}/medicines/adherence?days=7",
+        headers=_auth(client, login, doctor),
+    )
+    assert adherence.status_code == 200, adherence.text
+    assert adherence.json()["totals"] == {
+        "taken": 0,
+        "skipped": 0,
+        "missed": 0,
+        "scheduled_slots": 0,
+    }
+
+
+def test_adherence_filters_out_stray_future_log_row(
+    client: TestClient, project: Project, session: Session, login
+) -> None:
+    """Defense-in-depth: even if a future-dated dose row somehow lands
+    in the DB (bypassing the API — clock-skew slip, manual repair,
+    future migration), the adherence read must exclude it so
+    `taken + skipped` never exceeds `scheduled_slots`. We bypass the
+    API and insert the row directly here to simulate that path."""
+    resident_token, resident, resident_user = _onboard(
+        client, project, session, "+15559990631"
+    )
+    headers = {"Authorization": f"Bearer {resident_token}"}
+    doctor = _make_user(session, project, Role.DOCTOR)
+
+    tomorrow = date.today() + timedelta(days=1)
+    sched = client.post(
+        "/api/v1/me/medicines/schedules",
+        json=_schedule_body(start_date=tomorrow.isoformat()),
+        headers=headers,
+    ).json()
+
+    # Direct insert: simulates a stale row from a past version of the
+    # service. The API would reject this via `future_dose_slot`.
+    smuggled = MedicineDoseLog(
+        project_id=resident.project_id,
+        schedule_id=uuid.UUID(sched["id"]),
+        resident_id=resident.id,
+        scheduled_for=datetime.combine(tomorrow, datetime.min.time()).replace(hour=8),
+        status=MedicineDoseStatus.TAKEN.value,
+        logged_by=resident_user.id,
+    )
+    session.add(smuggled)
+    session.commit()
+
+    adherence = client.get(
+        f"/api/v1/residents/{resident.id}/medicines/adherence?days=7",
+        headers=_auth(client, login, doctor),
+    )
+    assert adherence.status_code == 200, adherence.text
+    totals = adherence.json()["totals"]
+    # The smuggled row exists but is filtered out: taken stays 0,
+    # scheduled_slots stays 0, invariant `taken + skipped <=
+    # scheduled_slots` holds.
+    assert totals["taken"] == 0
+    assert totals["scheduled_slots"] == 0
+    assert totals["taken"] + totals["skipped"] <= totals["scheduled_slots"] or (
+        totals["scheduled_slots"] == 0 and totals["taken"] + totals["skipped"] == 0
+    )

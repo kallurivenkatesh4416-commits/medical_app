@@ -55,6 +55,13 @@ from app.services.residents_service import assert_consent, get_resident_for_user
 # older than this with no log are counted as missed in adherence summaries.
 MISSED_GRACE_SECONDS = 60 * 60  # 1 hour
 
+# Mobile clock-skew tolerance for the future-dose check. A device sending
+# "I took my dose just now" can land a few seconds in the server's future;
+# anything beyond this is incoherent (you cannot have already taken a dose
+# whose slot has not arrived). 120 seconds covers normal drift without
+# letting a tomorrow-dated log poison adherence — see _is_valid_dose_slot.
+FUTURE_DOSE_TOLERANCE_SECONDS = 120
+
 
 @dataclass
 class ScheduleInput:
@@ -294,6 +301,19 @@ def log_own_dose(
         raise AuthError(
             409, "schedule_inactive", "Schedule is inactive; new doses cannot be logged."
         )
+    # Future-dose guard: a "taken" log for a slot that hasn't arrived yet
+    # is incoherent and would push `taken` above the day's
+    # `scheduled_slots` count (adherence projects slots only up to "now"
+    # — see _expand_slots). Applies to every frequency including
+    # AS_NEEDED, where `scheduled_for` is the actual intake time. A small
+    # tolerance covers mobile clock skew without letting tomorrow-dated
+    # logs through.
+    if (data.scheduled_for - utcnow()).total_seconds() > FUTURE_DOSE_TOLERANCE_SECONDS:
+        raise AuthError(
+            422,
+            "future_dose_slot",
+            "scheduled_for cannot be in the future; log the dose when the slot arrives.",
+        )
     # Slot integrity: only real schedule slots may be logged, so adherence
     # counts (`taken` + `skipped` over `scheduled_slots`) cannot exceed 100%
     # and the mobile app cannot poison the doctor's view by submitting an
@@ -401,10 +421,18 @@ def adherence_summary_for_staff(
             MedicineSchedule.resident_id == resident.id,
         )
     ).all()
+    # Defense in depth: even though log_own_dose rejects future-dated
+    # logs at write time, the adherence read explicitly drops any
+    # `scheduled_for > now` rows. If a stray future row ever lands
+    # (clock-skew slip, future migration, manual repair script) the
+    # doctor's adherence view still satisfies `taken + skipped ≤
+    # scheduled_slots` because `_expand_slots` only projects up to
+    # today.
     logs = session.exec(
         select(MedicineDoseLog).where(
             MedicineDoseLog.resident_id == resident.id,
             MedicineDoseLog.scheduled_for >= window_start,
+            MedicineDoseLog.scheduled_for <= now,
         )
     ).all()
 
