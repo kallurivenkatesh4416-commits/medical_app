@@ -38,16 +38,18 @@
   storage dependency lands. Behaviour and tests are unchanged by the path.
 - **Surfaced in:** Slice 6 review / `apps/mobile/lib/emergency_api.dart`
 
-### `[NEEDS_OPS_DECISION]` Mobile fallback-tap offline durability
-- **Question:** When a fallback button is tapped with no connectivity, the
-  `case_events` record write is best-effort and currently dropped on failure.
-  Is a persisted local outbox + later sync required for the audit/KPI trail?
-- **Why it matters:** The dial always proceeds (patient safety first), but the
-  "which fallback was used" signal can be lost offline.
-- **Technical default applied:** dial first, record best-effort; a failed
-  record does not block or delay the call. Local outbox deferred to the
-  Slice 12 hardening pass.
-- **Surfaced in:** Slice 6 / `apps/mobile/lib/emergency.dart`
+### `[RESOLVED-SLICE-12]` Mobile fallback-tap offline durability
+- **Original question:** When a fallback button is tapped with no connectivity,
+  should the fallback `case_events` write survive offline for the audit/KPI
+  trail?
+- **Resolution:** Slice 12 adds a mobile fallback-tap outbox. The dialer still
+  opens immediately; failed tap writes are persisted locally as case id,
+  channel, and idempotency key, then retried later.
+- **Backend guard:** `POST /emergency/alerts/{id}/fallback` accepts an optional
+  `Idempotency-Key`, so replaying the outbox does not duplicate
+  `fallback_invoked` events or audit rows.
+- **Surfaced in:** Slice 12 / `apps/mobile/lib/emergency.dart`,
+  `apps/mobile/lib/emergency_api.dart`, `app/services/emergency_service.py`
 
 ### `[NEEDS_OPS_DECISION]` <short title>
 - **Question:** …
@@ -57,17 +59,21 @@
 
 ## Technical hardening backlog (non-blocking, `[HARDENING]`)
 
-### `[HARDENING]` Stuck-claim reaper for notification outbox
+### `[RESOLVED-SLICE-12]` Stuck-claim reaper for notification outbox
 - **What:** delivery atomically claims an attempt (`queued → sending`) before
   calling the provider so concurrent delivery/replay cannot double-send. If a
-  process dies after claiming but before writing `sent`/`failed`, the row is
-  stuck in `sending` and is never retried (only `queued` rows resume).
-- **Why deliberate:** in an emergency, dropping one duplicate page is safer
-  than double-paging; the crash window is small.
-- **Plan:** a reaper that re-queues `sending` rows older than N seconds (with
-  an attempt counter / cap), plus the Postgres-backed concurrency test below.
-  Fits the Slice 12 hardening pass.
-- **Surfaced in:** Slice 6 review #2 / `emergency_service._claim_attempt`.
+  process dies after claiming but before writing `sent`/`failed`, the row can
+  be left in `sending`.
+- **Resolution:** Slice 12 adds
+  `POST /api/v1/emergency/notifications/requeue-stuck` and
+  `emergency_service.requeue_stuck_notification_attempts`. The reaper is
+  tenant-scoped, age-gated by `NOTIFICATION_STUCK_CLAIM_SECONDS`, audited, and
+  redelivers recovered attempts.
+- **Remaining tradeoff:** if the provider succeeded but the process died before
+  the DB write, the reaper may resend one old attempt. The age gate keeps this
+  out of active provider calls.
+- **Surfaced in:** Slice 12 / `emergency_service._claim_attempt`,
+  `emergency_service.requeue_stuck_notification_attempts`.
 
 ### `[HARDENING]` Postgres-backed concurrency test for refresh rotation
 - **What:** `rotate_refresh` relies on `SELECT ... FOR UPDATE` row locking. The

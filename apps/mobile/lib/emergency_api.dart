@@ -54,6 +54,64 @@ class FilePendingAlertStore implements PendingAlertStore {
   }
 }
 
+class FileFallbackTapStore implements FallbackTapStore {
+  FileFallbackTapStore({File? file})
+      : _file = file ??
+            File('${Directory.systemTemp.path}/med_emergency_fallback_taps.json');
+
+  final File _file;
+
+  @override
+  Future<List<PendingFallbackTap>> loadAll() async {
+    try {
+      if (!await _file.exists()) return [];
+      final raw = jsonDecode(await _file.readAsString());
+      if (raw is! List) return [];
+      return [
+        for (final item in raw)
+          if (item is Map && PendingFallbackTap.fromJson(item) != null)
+            PendingFallbackTap.fromJson(item)!,
+      ];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  @override
+  Future<void> save(PendingFallbackTap tap) async {
+    try {
+      final existing = {
+        for (final t in await loadAll()) t.idempotencyKey: t,
+      };
+      existing[tap.idempotencyKey] = tap;
+      await _file.writeAsString(
+        jsonEncode(existing.values.map((t) => t.toJson()).toList()),
+      );
+    } catch (_) {
+      // Best-effort durability; the dial already happened.
+    }
+  }
+
+  @override
+  Future<void> remove(String idempotencyKey) async {
+    try {
+      final existing = {
+        for (final t in await loadAll()) t.idempotencyKey: t,
+      };
+      existing.remove(idempotencyKey);
+      if (existing.isEmpty) {
+        if (await _file.exists()) await _file.delete();
+        return;
+      }
+      await _file.writeAsString(
+        jsonEncode(existing.values.map((t) => t.toJson()).toList()),
+      );
+    } catch (_) {
+      // A stale row is safe: the backend idempotency key dedupes replay.
+    }
+  }
+}
+
 /// Default network wiring for the emergency flow (PLAN.md Slice 6).
 ///
 /// Uses `dart:io` only — no extra package dependency. The access token /
@@ -138,17 +196,26 @@ class EmergencyApi {
     }
   }
 
-  Future<void> recordFallback(String caseId, String channel) async {
+  Future<void> recordFallback(
+    String caseId,
+    String channel,
+    String idempotencyKey,
+  ) async {
     final client = HttpClient();
     try {
       final req = await client.postUrl(
         Uri.parse('$baseUrl/api/v1/emergency/alerts/$caseId/fallback'),
       );
       _headers.forEach(req.headers.set);
+      req.headers.set('idempotency-key', idempotencyKey);
       req.add(utf8.encode(jsonEncode({'channel': channel})));
-      await req.close();
-    } catch (_) {
-      // Best-effort; the dial must proceed regardless.
+      final resp = await req.close();
+      final body = await resp.transform(utf8.decoder).join();
+      if (resp.statusCode < 200 || resp.statusCode >= 300) {
+        throw HttpException(
+          'fallback record failed: ${resp.statusCode} $body',
+        );
+      }
     } finally {
       client.close(force: true);
     }
@@ -160,5 +227,6 @@ class EmergencyApi {
         numbersFetcher: fallbackNumbers,
         recorder: recordFallback,
         store: FilePendingAlertStore(),
+        fallbackStore: FileFallbackTapStore(),
       );
 }

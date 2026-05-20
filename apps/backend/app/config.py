@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     # No server `acknowledged` within this window -> backup escalation + the
     # mobile fallback action sheet. The countdown never cancels the retrying alert.
     emergency_ack_timeout_seconds: int = 60
+    # Claimed notification attempts older than this can be re-queued by the
+    # Slice 12 reaper. A fresh claim updates attempted_at, so active provider
+    # calls are not immediately recycled.
+    notification_stuck_claim_seconds: int = 300
     # The ONLY hardcoded fallback numbers (brief §2.2); everything else is
     # resolved from project settings / the active on-call schedule.
     national_emergency_numbers: str = "108,112"

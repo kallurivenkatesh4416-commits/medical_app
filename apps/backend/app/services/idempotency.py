@@ -87,3 +87,4 @@ def stage(
 
 RECORDS_ENDPOINT = "records.upload"
 EMERGENCY_ALERTS_ENDPOINT = "emergency.alerts"
+EMERGENCY_FALLBACK_ENDPOINT = "emergency.fallback"

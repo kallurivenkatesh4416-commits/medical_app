@@ -366,6 +366,28 @@
   aggregate counters (`prn_taken` / `prn_skipped`) and are not used as a
   denominator for scheduled adherence.
 
+## Slice 12 implementation notes (emergency hardening)
+
+- **Offline fallback taps are durable without delaying the call.** The mobile
+  fallback outbox stores only `case_id`, `channel`, and an idempotency key.
+  It does not store resident names, flat/villa, symptoms, phone numbers,
+  vitals, notes, or records. The resident's dialer action still happens even
+  when the audit write is offline.
+- **Fallback replay is idempotent.** The backend fallback endpoint accepts an
+  optional `Idempotency-Key`; exact replays do not duplicate
+  `case_events.fallback_invoked` or `EMERGENCY_FALLBACK_INVOKED` audit rows,
+  while changed-channel or changed-owner reuse returns
+  `idempotency_key_conflict`.
+- **Stuck notification recovery is audited and age-gated.** The ops-only
+  reaper converts old `notification_attempts(status=sending)` rows back to
+  `queued`, records `EMERGENCY_NOTIFICATION_REQUEUED`, and redelivers. A
+  provider success followed by a DB crash can still result in one duplicate
+  page when the reaper later runs; this is the explicit emergency tradeoff,
+  bounded by `NOTIFICATION_STUCK_CLAIM_SECONDS`.
+- **Hardening proof lives with the docs.** `docs/slice12-hardening-report.md`
+  records the emergency load smoke, 2G latency simulation, offline fallback
+  verification, and the 92.53% emergency API/service coverage gate.
+
 ## Open questions — `[NEEDS_LEGAL_REVIEW]`
 
 1. `[NEEDS_LEGAL_REVIEW]` DPDP cross-border data: acceptable AWS S3 region for

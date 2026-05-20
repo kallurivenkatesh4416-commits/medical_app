@@ -120,4 +120,13 @@
   streamed directly and intentionally never writes to `StorageGateway`
   because it contains aggregate counts and durations only, not PHI.
 
+- **Slice 12**: no new backend tables. Fallback-tap replay reuses
+  `idempotency_keys` with endpoint `emergency.fallback` and
+  `resource_id = case_events.id` so the mobile offline outbox can retry the
+  same tap without duplicating `fallback_invoked` rows. The stuck-notification
+  reaper updates existing `notification_attempts` rows from `sending` back to
+  `queued`, audits `emergency_notification_requeued`, and then redelivers.
+  The mobile fallback outbox is device-local only and stores case id, channel,
+  and idempotency key.
+
 _Schema continues to grow per slice._

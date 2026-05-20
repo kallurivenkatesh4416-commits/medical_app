@@ -177,6 +177,7 @@ class AuditAction(StrEnum):
     EMERGENCY_ALERT_CREATED = "emergency_alert_created"
     EMERGENCY_ALERT_LIST = "emergency_alert_list"
     EMERGENCY_ALERT_ESCALATED = "emergency_alert_escalated"
+    EMERGENCY_NOTIFICATION_REQUEUED = "emergency_notification_requeued"
     EMERGENCY_FALLBACK_NUMBERS_READ = "emergency_fallback_numbers_read"
     EMERGENCY_FALLBACK_INVOKED = "emergency_fallback_invoked"
     EMERGENCY_CASE_READ = "emergency_case_read"

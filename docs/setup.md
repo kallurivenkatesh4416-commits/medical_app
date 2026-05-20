@@ -91,6 +91,16 @@ Then:
   These responses are audited and intentionally contain no patient names,
   flats, case ids, record ids, medicine names, vitals, notes, or signed
   links. Patient drill-in remains blocked by the automated RBAC matrix.
+- Slice 11: mobile polish. The resident app requires the full disclaimer
+  acknowledgement during onboarding, keeps the short disclaimer on health
+  insight screens, exposes `tel:108` from splash/login, adds the Phase-2
+  connected-devices settings copy, and applies elderly-UX defaults.
+- Slice 12: emergency hardening. Fallback taps now use a mobile local outbox
+  plus backend `Idempotency-Key` replay so offline dials can still land in
+  `case_events` later without duplicates. Ops can recover provider-crash rows
+  with `POST /api/v1/emergency/notifications/requeue-stuck`; the age gate is
+  `NOTIFICATION_STUCK_CLAIM_SECONDS`. The load/2G/coverage proof is in
+  `docs/slice12-hardening-report.md`.
 
 ### PDF renderer — WeasyPrint → xhtml2pdf substitution
 
@@ -129,7 +139,7 @@ real SMS provider. Seeded demo phones are `+15550000001`…`+15550000009`
 See `.env.example` (annotated). Provider keys (Twilio/FCM/AWS) are only needed from
 the slice that uses them; default `PROVIDER_MODE=stub` needs no external accounts.
 
-_Status: Slices 1-10 cover backend foundation, auth/RBAC/audit,
+_Status: Slices 1-12 cover backend foundation, auth/RBAC/audit,
 onboarding/consent/profile, medical-record upload/list/link, the emergency
 happy path with dashboard feed, emergency hardening (3-channel fan-out,
 on-call resolution, 60s backup escalation, mobile offline retry + fallback
@@ -137,6 +147,8 @@ sheet), case lifecycle/vitals/notes/aggregate KPIs, hospital handover
 PDF (xhtml2pdf, 15-minute signed link, email + WhatsApp dispatch), and
 medicine reminders (resident schedules, device-local reminders, taken/
 skipped logs, doctor adherence view, handover §6 wire-in), and the
-PHI-free admin dashboard with monthly PDF/CSV export. Live Twilio (SMS /
+PHI-free admin dashboard with monthly PDF/CSV export, mobile polish, and
+Slice 12 emergency hardening (fallback-tap outbox, stuck-notification reaper,
+2G/load tests, and 92.53% emergency API/service coverage). Live Twilio (SMS /
 voice / WhatsApp) + live SMTP are wired and configured per `.env.example`;
 live FCM push is a separate operator-keys task._

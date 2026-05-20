@@ -40,7 +40,11 @@ class AlertResult {
 typedef AlertSender = Future<AlertResult> Function(String idempotencyKey);
 typedef AckChecker = Future<bool> Function(String caseId);
 typedef FallbackNumbersFetcher = Future<FallbackNumbers> Function(String caseId);
-typedef FallbackRecorder = Future<void> Function(String caseId, String channel);
+typedef FallbackRecorder = Future<void> Function(
+  String caseId,
+  String channel,
+  String idempotencyKey,
+);
 
 /// The in-flight alert persisted across app restarts: the idempotency key
 /// (so a resumed retry never creates a duplicate case) and, once the server
@@ -53,12 +57,53 @@ class PendingAlert {
   final String? caseId;
 }
 
+/// A fallback-sheet tap that could not be written to the backend because the
+/// device was offline. The dial has already happened; this outbox preserves
+/// the audit/KPI trail and retries with the same idempotency key.
+class PendingFallbackTap {
+  const PendingFallbackTap({
+    required this.caseId,
+    required this.channel,
+    required this.idempotencyKey,
+  });
+
+  final String caseId;
+  final String channel;
+  final String idempotencyKey;
+
+  Map<String, String> toJson() => {
+        'case_id': caseId,
+        'channel': channel,
+        'idempotency_key': idempotencyKey,
+      };
+
+  static PendingFallbackTap? fromJson(Map<dynamic, dynamic> raw) {
+    final caseId = raw['case_id'];
+    final channel = raw['channel'];
+    final key = raw['idempotency_key'];
+    if (caseId is! String || caseId.isEmpty) return null;
+    if (channel is! String || channel.isEmpty) return null;
+    if (key is! String || key.isEmpty) return null;
+    return PendingFallbackTap(
+      caseId: caseId,
+      channel: channel,
+      idempotencyKey: key,
+    );
+  }
+}
+
 /// Durable store for the [PendingAlert]. A disk-backed implementation lives in
 /// `emergency_api.dart`; tests use the in-memory one.
 abstract class PendingAlertStore {
   Future<PendingAlert?> load();
   Future<void> save(PendingAlert pending);
   Future<void> clear();
+}
+
+abstract class FallbackTapStore {
+  Future<List<PendingFallbackTap>> loadAll();
+  Future<void> save(PendingFallbackTap tap);
+  Future<void> remove(String idempotencyKey);
 }
 
 class InMemoryPendingAlertStore implements PendingAlertStore {
@@ -74,9 +119,29 @@ class InMemoryPendingAlertStore implements PendingAlertStore {
   Future<void> clear() async => _value = null;
 }
 
+class InMemoryFallbackTapStore implements FallbackTapStore {
+  final Map<String, PendingFallbackTap> _values = {};
+
+  @override
+  Future<List<PendingFallbackTap>> loadAll() async => _values.values.toList();
+
+  @override
+  Future<void> save(PendingFallbackTap tap) async {
+    _values[tap.idempotencyKey] = tap;
+  }
+
+  @override
+  Future<void> remove(String idempotencyKey) async {
+    _values.remove(idempotencyKey);
+  }
+}
+
 String _defaultKeyFactory() =>
     'm-${DateTime.now().microsecondsSinceEpoch}-${_seq++}';
 int _seq = 0;
+String _defaultFallbackKeyFactory() =>
+    'fb-${DateTime.now().microsecondsSinceEpoch}-${_fallbackSeq++}';
+int _fallbackSeq = 0;
 
 /// Channel keys — must match backend `FallbackChannel` (shared enum source).
 class FallbackChannelKey {
@@ -100,18 +165,25 @@ class EmergencyController extends ChangeNotifier {
     required this.numbersFetcher,
     required this.recorder,
     PendingAlertStore? store,
+    FallbackTapStore? fallbackStore,
     String Function()? keyFactory,
+    String Function()? fallbackKeyFactory,
     this.retryInterval = const Duration(seconds: 5),
     this.ackWindow = const Duration(seconds: 60),
   })  : store = store ?? InMemoryPendingAlertStore(),
-        _keyFactory = keyFactory ?? _defaultKeyFactory;
+        fallbackStore = fallbackStore ?? InMemoryFallbackTapStore(),
+        _keyFactory = keyFactory ?? _defaultKeyFactory,
+        _fallbackKeyFactory =
+            fallbackKeyFactory ?? _defaultFallbackKeyFactory;
 
   final AlertSender sender;
   final AckChecker ackChecker;
   final FallbackNumbersFetcher numbersFetcher;
   final FallbackRecorder recorder;
   final PendingAlertStore store;
+  final FallbackTapStore fallbackStore;
   final String Function() _keyFactory;
+  final String Function() _fallbackKeyFactory;
   final Duration retryInterval;
   final Duration ackWindow;
 
@@ -140,6 +212,7 @@ class EmergencyController extends ChangeNotifier {
   /// id is stored), don't re-send — just restart the ack countdown so the
   /// fallback sheet / status polling continuity survives the kill.
   Future<void> restore() async {
+    await syncPendingFallbackTaps();
     if (phase != AlertPhase.idle || idempotencyKey != null) return;
     final saved = await store.load();
     if (saved == null) return;
@@ -230,19 +303,43 @@ class EmergencyController extends ChangeNotifier {
     }
   }
 
-  /// Record the chosen channel (best-effort — a failure must never stop the
-  /// dial) then return so the caller can launch the dialer.
+  /// Record the chosen channel or persist it for later sync. A failure must
+  /// never stop the dial, so offline writes go to [fallbackStore].
   Future<void> recordFallback(String channel) async {
     final id = caseId;
     if (id == null) return;
-    try {
-      await recorder(id, channel);
-    } catch (_) {
-      // Recording is best-effort; the call itself must still go through.
+    final tap = PendingFallbackTap(
+      caseId: id,
+      channel: channel,
+      idempotencyKey: _fallbackKeyFactory(),
+    );
+    if (await _sendFallbackTap(tap)) {
+      await fallbackStore.remove(tap.idempotencyKey);
+    } else {
+      await fallbackStore.save(tap);
     }
     // The resident is now reaching help directly — the alert is resolved
     // from the app's standpoint, so stop resuming it after a kill.
     await store.clear();
+  }
+
+  Future<void> syncPendingFallbackTaps() async {
+    final pending = await fallbackStore.loadAll();
+    for (final tap in pending) {
+      if (_disposed) return;
+      if (await _sendFallbackTap(tap)) {
+        await fallbackStore.remove(tap.idempotencyKey);
+      }
+    }
+  }
+
+  Future<bool> _sendFallbackTap(PendingFallbackTap tap) async {
+    try {
+      await recorder(tap.caseId, tap.channel, tap.idempotencyKey);
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   void _safeNotify() {

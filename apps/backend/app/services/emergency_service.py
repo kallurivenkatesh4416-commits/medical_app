@@ -768,23 +768,90 @@ def _deliver_pending(session: Session, *, case: EmergencyCase) -> None:
         )
 
 
+def requeue_stuck_notification_attempts(
+    session: Session,
+    *,
+    project_id: uuid.UUID,
+    actor_user_id: uuid.UUID | None = None,
+    from_ip: str | None = None,
+    older_than_seconds: int | None = None,
+    now: datetime | None = None,
+    deliver: bool = True,
+) -> list[uuid.UUID]:
+    """Recover provider-crash rows left in ``sending``.
+
+    Delivery first claims ``queued -> sending`` so concurrent create/replay
+    callers cannot double-page. If the process dies after that claim and before
+    writing ``sent``/``failed``, the only safe recovery is an age-gated requeue.
+    This may resend one old attempt, but it never races with an active provider
+    call because fresh claims update ``attempted_at``.
+    """
+    moment = now or utcnow()
+    threshold = max(
+        1,
+        older_than_seconds
+        if older_than_seconds is not None
+        else get_settings().notification_stuck_claim_seconds,
+    )
+    cutoff = moment - timedelta(seconds=threshold)
+    stuck = session.exec(
+        select(NotificationAttempt)
+        .where(
+            NotificationAttempt.project_id == project_id,
+            NotificationAttempt.status == NotificationStatus.SENDING.value,
+            NotificationAttempt.attempted_at <= cutoff,
+        )
+        .order_by(NotificationAttempt.attempted_at)  # type: ignore[arg-type]
+    ).all()
+    if not stuck:
+        return []
+
+    attempt_ids = [a.id for a in stuck]
+    case_ids = sorted({a.case_id for a in stuck}, key=str)
+    for attempt in stuck:
+        attempt.status = NotificationStatus.QUEUED.value
+        attempt.error = "requeued_after_stuck_claim"
+        attempt.attempted_at = moment
+        session.add(attempt)
+    record_audit(
+        session,
+        action=AuditAction.EMERGENCY_NOTIFICATION_REQUEUED,
+        actor_user_id=actor_user_id,
+        project_id=project_id,
+        resource_type="notification_attempt",
+        from_ip=from_ip,
+        purpose="emergency.notification_reaper",
+        meta={
+            "attempt_ids": [str(i) for i in attempt_ids],
+            "older_than_seconds": threshold,
+        },
+        commit=False,
+    )
+    session.commit()
+
+    if deliver:
+        for case_id in case_ids:
+            case = session.get(EmergencyCase, case_id)
+            if case is not None:
+                _deliver_pending(session, case=case)
+    return attempt_ids
+
+
 def _claim_attempt(session: Session, attempt: NotificationAttempt) -> bool:
     """Atomically move this attempt ``queued -> sending``. Returns True iff
     THIS caller won the claim. A conditional UPDATE (only matches while still
     ``queued``) makes the original delivery and a concurrent replay/resume
     mutually exclusive, so the provider is called at most once per attempt.
 
-    The provider crash window (claimed but never finalised) leaves a row stuck
-    in ``sending``; a stuck-claim reaper is a documented hardening item
-    (docs/open-questions.md) — losing one notification is the safer failure
-    than double-paging in an emergency."""
+    The provider crash window (claimed but never finalised) leaves a row in
+    ``sending`` until the Slice 12 reaper age-gates and redelivers it."""
     result = session.execute(
         update(NotificationAttempt)
         .where(
             NotificationAttempt.id == attempt.id,
             NotificationAttempt.status == NotificationStatus.QUEUED.value,
         )
-        .values(status=NotificationStatus.SENDING.value)
+        .values(status=NotificationStatus.SENDING.value, attempted_at=utcnow())
     )
     session.commit()
     claimed = result.rowcount == 1
@@ -846,6 +913,7 @@ def _deliver_one(
         else:  # pragma: no cover - guarded by the planner
             raise _ChannelSkip("unknown_channel")
         attempt.status = NotificationStatus.SENT.value
+        attempt.error = None
     except _ChannelSkip as skip:
         attempt.status = NotificationStatus.FAILED.value
         attempt.error = str(skip)
@@ -1078,21 +1146,41 @@ def record_fallback(
     user: User,
     channel: FallbackChannel,
     from_ip: str | None,
+    idem_ctx: idempotency.IdemContext | None = None,
 ) -> dict:
     """Every fallback tap writes a ``case_events`` row with the chosen channel.
-    The original alert keeps retrying on the device; this only records intent."""
+    The original alert keeps retrying on the device; this only records intent.
+
+    Slice 12 lets the mobile app persist failed tap writes locally and replay
+    them later with the same idempotency key, so an offline dial can still land
+    in the audit trail without duplicating ``fallback_invoked`` events.
+    """
     case, _ = _owned_case(session, case_id=case_id, user=user)
-    session.add(
-        CaseEvent(
-            project_id=case.project_id,
-            case_id=case.id,
-            actor_user_id=user.id,
-            event_type=FALLBACK_INVOKED_EVENT,
-            from_status=case.status,
-            to_status=case.status,
-            meta={"channel": channel.value},
-        )
+    if idem_ctx is not None:
+        try:
+            prior = idempotency.check_replay(
+                session, idempotency.EMERGENCY_FALLBACK_ENDPOINT, idem_ctx
+            )
+        except idempotency.IdempotencyConflict as exc:
+            raise AuthError(
+                409,
+                "idempotency_key_conflict",
+                "This Idempotency-Key was used with a different request or account.",
+            ) from exc
+        if prior is not None:
+            return {"case_id": case.id, "channel": channel.value, "recorded": True}
+
+    event = CaseEvent(
+        project_id=case.project_id,
+        case_id=case.id,
+        actor_user_id=user.id,
+        event_type=FALLBACK_INVOKED_EVENT,
+        from_status=case.status,
+        to_status=case.status,
+        meta={"channel": channel.value},
     )
+    session.add(event)
+    session.flush()
     record_audit(
         session,
         action=AuditAction.EMERGENCY_FALLBACK_INVOKED,
@@ -1105,5 +1193,31 @@ def record_fallback(
         meta={"channel": channel.value},
         commit=False,
     )
-    session.commit()
+    try:
+        if idem_ctx is not None:
+            idempotency.stage(
+                session,
+                endpoint=idempotency.EMERGENCY_FALLBACK_ENDPOINT,
+                ctx=idem_ctx,
+                resource_id=event.id,
+            )
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        if idem_ctx is not None:
+            try:
+                prior = idempotency.check_replay(
+                    session, idempotency.EMERGENCY_FALLBACK_ENDPOINT, idem_ctx
+                )
+            except idempotency.IdempotencyConflict as conflict:
+                raise AuthError(
+                    409,
+                    "idempotency_key_conflict",
+                    "This Idempotency-Key was used with a different request or account.",
+                ) from conflict
+            if prior is not None:
+                return {"case_id": case.id, "channel": channel.value, "recorded": True}
+        raise AuthError(
+            409, "fallback_record_conflict", "Fallback tap could not be recorded."
+        ) from exc
     return {"case_id": case.id, "channel": channel.value, "recorded": True}

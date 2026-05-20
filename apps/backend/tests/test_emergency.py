@@ -1184,3 +1184,162 @@ def test_security_desk_not_paged_when_no_oncall(
         if a.recipient_id == desk_user.id
     ]
     assert desk_attempts == []
+
+
+def test_fallback_tap_idempotency_dedupes_offline_replay(
+    client: TestClient, project: Project, session: Session, make_user
+) -> None:
+    resident_token, _ = _onboard(client, project, session, "+15559993001")
+    make_user(Role.DOCTOR, phone="+15559993002")
+    created = client.post(
+        "/api/v1/emergency/alerts",
+        json={"symptom_codes": ["fall"]},
+        headers={
+            "Authorization": f"Bearer {resident_token}",
+            "Idempotency-Key": "fb-replay-alert",
+        },
+    )
+    assert created.status_code == 200, created.text
+    case_id = created.json()["id"]
+    headers = {
+        "Authorization": f"Bearer {resident_token}",
+        "Idempotency-Key": "fb-tap-offline-1",
+    }
+
+    first = client.post(
+        f"/api/v1/emergency/alerts/{case_id}/fallback",
+        json={"channel": FallbackChannel.EMERGENCY_108.value},
+        headers=headers,
+    )
+    assert first.status_code == 200, first.text
+    replay = client.post(
+        f"/api/v1/emergency/alerts/{case_id}/fallback",
+        json={"channel": FallbackChannel.EMERGENCY_108.value},
+        headers=headers,
+    )
+    assert replay.status_code == 200, replay.text
+
+    cid = uuid.UUID(case_id)
+    events = session.exec(
+        select(CaseEvent).where(
+            CaseEvent.case_id == cid,
+            CaseEvent.event_type == emergency_service.FALLBACK_INVOKED_EVENT,
+        )
+    ).all()
+    assert len(events) == 1
+    assert events[0].meta == {"channel": FallbackChannel.EMERGENCY_108.value}
+    assert (
+        list(session.exec(select(AuditLog.action)).all()).count(
+            AuditAction.EMERGENCY_FALLBACK_INVOKED.value
+        )
+        == 1
+    )
+
+    changed = client.post(
+        f"/api/v1/emergency/alerts/{case_id}/fallback",
+        json={"channel": FallbackChannel.EMERGENCY_112.value},
+        headers=headers,
+    )
+    assert changed.status_code == 409
+    assert changed.json()["error"]["code"] == "idempotency_key_conflict"
+
+
+def test_stuck_notification_reaper_requeues_and_delivers(
+    client: TestClient, project: Project, session: Session, make_user, login
+) -> None:
+    _, resident = _onboard(client, project, session, "+15559993003")
+    doctor = make_user(Role.DOCTOR, phone="+15559993004")
+    _register_doctor_push(client, _auth(client, login, doctor))
+    ops = make_user(Role.OPS, phone="+15559993005")
+
+    case = EmergencyCase(
+        project_id=project.id,
+        resident_id=resident.id,
+        created_by_user_id=resident.user_id,
+        assigned_doctor_id=doctor.id,
+        status=CaseStatus.ALERTED.value,
+        symptom_codes=[],
+    )
+    session.add(case)
+    session.commit()
+    stuck = NotificationAttempt(
+        project_id=project.id,
+        case_id=case.id,
+        channel=NotificationChannel.FCM.value,
+        recipient_id=doctor.id,
+        status=NotificationStatus.SENDING.value,
+        error="process_crashed_mid_send",
+        attempted_at=utcnow() - timedelta(seconds=600),
+    )
+    fresh = NotificationAttempt(
+        project_id=project.id,
+        case_id=case.id,
+        channel=NotificationChannel.SMS.value,
+        recipient_id=doctor.id,
+        status=NotificationStatus.SENDING.value,
+        error="active_provider_call",
+        attempted_at=utcnow(),
+    )
+    session.add(stuck)
+    session.add(fresh)
+    session.commit()
+
+    resp = client.post(
+        "/api/v1/emergency/notifications/requeue-stuck?older_than_seconds=300",
+        headers=_auth(client, login, ops),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["requeued_attempt_ids"] == [str(stuck.id)]
+
+    session.expire_all()
+    recovered = session.get(NotificationAttempt, stuck.id)
+    still_active = session.get(NotificationAttempt, fresh.id)
+    assert recovered.status == NotificationStatus.SENT.value
+    assert recovered.provider_ref == "stub-push"
+    assert recovered.error is None
+    assert still_active.status == NotificationStatus.SENDING.value
+    assert still_active.error == "active_provider_call"
+    assert AuditAction.EMERGENCY_NOTIFICATION_REQUEUED.value in list(
+        session.exec(select(AuditLog.action)).all()
+    )
+
+
+def test_emergency_alert_load_smoke_dedupes_replays_and_attempts(
+    client: TestClient, project: Project, session: Session, make_user, login
+) -> None:
+    resident_token, _ = _onboard(client, project, session, "+15559993006")
+    doctor = make_user(Role.DOCTOR, phone="+15559993007")
+    _register_doctor_push(client, _auth(client, login, doctor))
+    payload = {"symptom_codes": ["fall"], "location_text": "Tower A lobby"}
+
+    created_ids: list[str] = []
+    for i in range(30):
+        resp = client.post(
+            "/api/v1/emergency/alerts",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {resident_token}",
+                "Idempotency-Key": f"load-{i}",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        created_ids.append(resp.json()["id"])
+
+    for i in range(5):
+        replay = client.post(
+            "/api/v1/emergency/alerts",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {resident_token}",
+                "Idempotency-Key": f"load-{i}",
+            },
+        )
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["id"] == created_ids[i]
+
+    cases = session.exec(select(EmergencyCase)).all()
+    attempts = session.exec(select(NotificationAttempt)).all()
+    assert len(cases) == 30
+    assert len(set(created_ids)) == 30
+    assert len(attempts) == 30 * 3
+    assert {a.status for a in attempts} == {NotificationStatus.SENT.value}

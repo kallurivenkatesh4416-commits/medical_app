@@ -42,8 +42,9 @@
 | GET | `/api/v1/emergency/alerts/active` | 5 | doctor/nurse/ops active alert feed; PHI-blocked and tenant-scoped |
 | GET | `/api/v1/emergency/alerts/{case_id}/status` | 6 | resident (owner) PHI-free `{status, acknowledged}`; drives the mobile fallback countdown (the staff feed is not resident-visible) |
 | POST | `/api/v1/emergency/escalations/run` | 6 | ops-only, tenant-scoped; pages the backup doctor for alerts with no ack within the window. Idempotent; manual entry point until scheduler infra lands |
+| POST | `/api/v1/emergency/notifications/requeue-stuck?older_than_seconds=N` | 12 | ops-only, tenant-scoped; re-queues and redelivers notification attempts stuck in `sending` after a provider-process crash; audited |
 | GET | `/api/v1/emergency/alerts/{case_id}/fallback-numbers` | 6 | resident (owner) fallback numbers; 108/112 are constants, the rest resolved from project / on-call / contacts; audited |
-| POST | `/api/v1/emergency/alerts/{case_id}/fallback` | 6 | resident (owner) records a fallback-sheet tap (`channel`) to `case_events`; audited. Does not cancel the retrying alert |
+| POST | `/api/v1/emergency/alerts/{case_id}/fallback` | 6/12 | resident (owner) records a fallback-sheet tap (`channel`) to `case_events`; audited. Optional `Idempotency-Key` lets the mobile offline outbox replay without duplicating the event. Does not cancel the retrying alert |
 | GET | `/api/v1/emergency/alerts/{case_id}` | 7 | doctor/nurse/ops case detail with vitals, notes, and timeline; PHI-blocked, tenant-scoped, audited |
 | POST | `/api/v1/emergency/alerts/{case_id}/transition` | 7 | doctor/nurse lifecycle transition (`acknowledged → en_route → on_site → treated_on_site/escalated → closed`); every transition writes `case_events` + audit |
 | POST | `/api/v1/emergency/alerts/{case_id}/vitals` | 7 | doctor/nurse records manual vitals after `on_site`; audited and timeline-backed |

@@ -93,9 +93,8 @@
   (`queued → sending` via a conditional UPDATE) before calling the provider.
   A concurrent original-delivery and lost-response replay can no longer both
   send the same attempt — the loser of the claim simply skips. A claimed-but-
-  unfinished row (provider crash) stays `sending`; a stuck-claim reaper is a
-  documented Slice 12 hardening item (losing one page is safer than double-
-  paging in an emergency).
+  unfinished row (provider crash) stays `sending` until the Slice 12 stuck-
+  notification reaper age-gates, requeues, audits, and redelivers it.
 - **Duty-phone scoping:** `_contact_phone_for` now filters the on-call lookup
   by the case's `project_id` **and** the recipient's role, so overlapping/
   stale schedule rows in another project or role cannot supply the wrong
@@ -133,3 +132,23 @@
   endpoint, while patient-level case detail remains blocked.
 
 - Still Slice 8: hospital handover PDF generation and dispatch.
+
+## Slice 12 hardening status
+
+- **Fallback tap durability:** mobile fallback taps now have a local outbox.
+  If the resident taps Call doctor / 108 / 112 / family / security while the
+  backend write is offline, the dialer still opens immediately and the app
+  retries the tap later with the same idempotency key. The outbox stores only
+  case id, channel, and idempotency key.
+- **Idempotent fallback endpoint:** `POST /emergency/alerts/{id}/fallback`
+  accepts an optional `Idempotency-Key`. A replay writes no duplicate
+  `fallback_invoked` event or audit row; a same-key different-channel replay
+  is rejected with `idempotency_key_conflict`.
+- **Stuck notification recovery:** `POST /emergency/notifications/requeue-stuck`
+  lets ops requeue/redeliver old `notification_attempts(status=sending)` rows
+  after a provider-process crash. The reaper is tenant-scoped, age-gated by
+  `NOTIFICATION_STUCK_CLAIM_SECONDS`, and audited with
+  `EMERGENCY_NOTIFICATION_REQUEUED`.
+- **Hardening proof:** `docs/slice12-hardening-report.md` records the emergency
+  load smoke test, 2G latency simulation, offline fallback verification, and
+  92.53% backend emergency API/service coverage gate.

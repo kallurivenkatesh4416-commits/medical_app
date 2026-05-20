@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, Header, Query, Request
 from pydantic import BaseModel, Field
 from sqlmodel import Session
 
@@ -154,6 +154,10 @@ class FallbackTapOut(BaseModel):
 
 class EscalationRunOut(BaseModel):
     escalated_case_ids: list[uuid.UUID]
+
+
+class NotificationRequeueOut(BaseModel):
+    requeued_attempt_ids: list[uuid.UUID]
 
 
 class EmergencyKpiOut(BaseModel):
@@ -362,6 +366,31 @@ def run_backup_escalation(
     return EscalationRunOut(escalated_case_ids=ids)
 
 
+@router.post(
+    "/emergency/notifications/requeue-stuck",
+    response_model=NotificationRequeueOut,
+)
+def requeue_stuck_notifications(
+    request: Request,
+    older_than_seconds: int | None = Query(default=None, ge=1, le=86_400),
+    actor: User = Depends(ops_only),
+    session: Session = Depends(get_db),
+) -> NotificationRequeueOut:
+    """Recover notification attempts left in ``sending`` after a provider
+    process crash. Tenant-scoped to the ops actor's project and age-gated so a
+    live provider call is not immediately recycled."""
+    if actor.project_id is None:
+        raise AuthError(403, "project_required", "A project-scoped account is required.")
+    ids = emergency_service.requeue_stuck_notification_attempts(
+        session,
+        project_id=actor.project_id,
+        actor_user_id=actor.id,
+        from_ip=client_ip(request),
+        older_than_seconds=older_than_seconds,
+    )
+    return NotificationRequeueOut(requeued_attempt_ids=ids)
+
+
 @router.get(
     "/emergency/alerts/{case_id}/status",
     response_model=CaseStatusOut,
@@ -402,13 +431,26 @@ def emergency_fallback_tap(
     case_id: uuid.UUID,
     body: FallbackTapIn,
     request: Request,
+    idempotency_key: str | None = idempotency_key_header,
     user: User = Depends(resident_only),
     session: Session = Depends(get_db),
 ) -> dict:
+    idem_ctx: idempotency.IdemContext | None = None
+    if idempotency_key:
+        if len(idempotency_key) > 128:
+            raise AuthError(422, "invalid_idempotency_key", "Idempotency-Key is too long.")
+        idem_ctx = idempotency.IdemContext(
+            key=idempotency_key,
+            owner_fp=idempotency.owner_fingerprint(user.phone),
+            request_fp=idempotency.request_fingerprint(
+                {"case_id": str(case_id), "channel": body.channel.value}
+            ),
+        )
     return emergency_service.record_fallback(
         session,
         case_id=case_id,
         user=user,
         channel=body.channel,
         from_ip=client_ip(request),
+        idem_ctx=idem_ctx,
     )
