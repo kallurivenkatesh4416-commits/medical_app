@@ -8,12 +8,17 @@ emergency fan-out exercises all three (`send_push` + `send_sms` +
 provider ref per channel so the whole fan-out — including "kill push, others
 still deliver" — is testable with zero external deps.
 
-Slice 6/8 add the live Twilio implementation for SMS / voice / WhatsApp
-(``TwilioNotificationGateway`` below). FCM push live wiring is intentionally
-NOT implemented here — its credential model is different (service-account
-file) and the operator-keys task tracks that separately; calling
-``send_push`` on the live gateway raises and Slice 6's fan-out records that
-channel as failed without blocking the others.
+Slice 6/8 added the live Twilio implementation for SMS / voice / WhatsApp
+(``TwilioNotificationGateway`` below). Slice 16 lands live FCM push via
+``FcmPushGateway`` (separate module — its credential / OAuth2 path is
+distinct from Twilio's basic auth). ``CompositeGateway`` joins them so
+``provider_mode='live'`` exercises all three channels for real; one
+channel failing remains logged-and-swallowed by the Slice 6 fan-out.
+
+When ``FCM_SERVICE_ACCOUNT_FILE`` is empty in live mode the composite
+still constructs but ``send_push`` raises ``FcmConfigError``, mirroring
+the way the old gateway raised ``NotImplementedError`` — Slice 6's
+fan-out records FCM as failed without blocking SMS / voice.
 """
 
 from typing import Protocol
@@ -23,6 +28,7 @@ from requests.auth import HTTPBasicAuth
 
 from app.config import get_settings
 from app.logging import get_logger
+from app.services.fcm import FcmConfigError, FcmPushGateway
 
 _log = get_logger("notifications")
 
@@ -102,6 +108,13 @@ class TwilioNotificationGateway:
         self._sms_from = s.twilio_sms_from
         self._voice_from = s.twilio_voice_from
         self._whatsapp_from = s.twilio_whatsapp_from
+        # Slice 16: when configured, every Twilio send rides with a
+        # `StatusCallback` so the provider posts delivery/failure state
+        # back to us. The webhook handler validates X-Twilio-Signature
+        # before updating `notification_attempts`. Leaving this blank
+        # disables callbacks (`sent` from the synchronous REST call stays
+        # the only signal — matches pre-Slice-16 behaviour).
+        self._status_callback_url = s.twilio_status_callback_url
 
     def _messages_url(self) -> str:
         return f"{_TWILIO_API_BASE}/Accounts/{self._account_sid}/Messages.json"
@@ -112,10 +125,13 @@ class TwilioNotificationGateway:
     def _post_message(self, *, to: str, body: str, sender: str | None, channel: str) -> str:
         if not sender:
             raise RuntimeError(f"twilio {channel} sender is not configured")
+        data: dict[str, str] = {"From": sender, "To": to, "Body": body}
+        if self._status_callback_url:
+            data["StatusCallback"] = self._status_callback_url
         resp = requests.post(
             self._messages_url(),
             auth=self._auth,
-            data={"From": sender, "To": to, "Body": body},
+            data=data,
             timeout=_TWILIO_TIMEOUT_SECONDS,
         )
         resp.raise_for_status()
@@ -126,23 +142,34 @@ class TwilioNotificationGateway:
         return self._post_message(to=to, body=body, sender=self._sms_from, channel="sms")
 
     def send_push(self, *, token: str, title: str, body: str) -> str:
-        # FCM is intentionally NOT routed through Twilio. The live FCM service
-        # account is tracked as a separate operator-keys task; until that
-        # lands, calling this on the live gateway raises and Slice 6's
-        # fan-out marks the FCM attempt failed without blocking SMS / voice.
-        raise NotImplementedError(
-            "FCM live wiring requires a service-account file (FCM_SERVICE_ACCOUNT_FILE); "
-            "configure that and replace this method, or fan-out will degrade gracefully"
+        # FCM is not a Twilio service. The composite gateway built by
+        # `get_notification_gateway()` routes push to `FcmPushGateway`
+        # instead of this method; this stays as a defensive fallback so a
+        # direct caller (e.g. a test that constructs Twilio in isolation)
+        # gets a clear error rather than a silent no-op. Slice 6's fan-out
+        # logs this as the FCM attempt's failure and continues with SMS /
+        # voice — patient-safety invariant preserved.
+        raise FcmConfigError(
+            "TwilioNotificationGateway does not implement send_push. "
+            "Use `get_notification_gateway()` to get the composite that "
+            "routes push through FcmPushGateway."
         )
 
     def place_voice_call(self, *, to: str, twiml_url: str) -> str:
         if not self._voice_from:
             raise RuntimeError("twilio voice sender is not configured")
         _log.info("twilio_voice", to=_mask(to))
+        data: dict[str, str] = {
+            "From": self._voice_from,
+            "To": to,
+            "Url": twiml_url,
+        }
+        if self._status_callback_url:
+            data["StatusCallback"] = self._status_callback_url
         resp = requests.post(
             self._calls_url(),
             auth=self._auth,
-            data={"From": self._voice_from, "To": to, "Url": twiml_url},
+            data=data,
             timeout=_TWILIO_TIMEOUT_SECONDS,
         )
         resp.raise_for_status()
@@ -163,15 +190,50 @@ class TwilioNotificationGateway:
         )
 
 
+class CompositeGateway:
+    """Slice 16 — joins ``FcmPushGateway`` (push) and
+    ``TwilioNotificationGateway`` (SMS / voice / WhatsApp) behind the
+    single ``NotificationGateway`` protocol the emergency fan-out depends
+    on. Slice 6's "one channel down, other two still fire" invariant
+    holds because the fan-out catches exceptions per attempt — the
+    composite just routes the call to the right vendor; it does NOT try
+    to recover failures on its behalf."""
+
+    def __init__(
+        self,
+        *,
+        push: "NotificationGateway",
+        messaging: "NotificationGateway",
+    ) -> None:
+        self._push = push
+        self._messaging = messaging
+
+    def send_push(self, *, token: str, title: str, body: str) -> str:
+        return self._push.send_push(token=token, title=title, body=body)
+
+    def send_sms(self, *, to: str, body: str) -> str:
+        return self._messaging.send_sms(to=to, body=body)
+
+    def place_voice_call(self, *, to: str, twiml_url: str) -> str:
+        return self._messaging.place_voice_call(to=to, twiml_url=twiml_url)
+
+    def send_whatsapp(self, *, to: str, body: str) -> str:
+        return self._messaging.send_whatsapp(to=to, body=body)
+
+
 def get_notification_gateway() -> NotificationGateway:
     mode = get_settings().provider_mode
     if mode == "stub":
         return StubNotificationGateway()
     if mode == "live":
-        # Live Twilio for SMS / voice / WhatsApp; FCM raises in `send_push`
-        # until its separate live wiring lands (see TwilioNotificationGateway
-        # docstring).
-        return TwilioNotificationGateway()
+        # Slice 16: live = FCM (push) + Twilio (SMS/voice/WhatsApp).
+        # Both classes lazy-load their credentials so the composite can be
+        # constructed even when one set of keys is incomplete — the missing
+        # channel surfaces as a failed attempt at send time, not at startup.
+        return CompositeGateway(
+            push=FcmPushGateway(),
+            messaging=TwilioNotificationGateway(),
+        )
     raise NotImplementedError(
         f"provider_mode='{mode}' is not a known mode; use 'stub' or 'live'"
     )

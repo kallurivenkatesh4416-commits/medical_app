@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -17,6 +18,8 @@ import 'medicines_repository.dart';
 import 'onboarding.dart';
 import 'onboarding_repository.dart';
 import 'profile_repository.dart';
+import 'push/device_token_repository.dart';
+import 'push/push_token_provider.dart';
 import 'records_repository.dart';
 import 'records_upload_picker.dart';
 import 'safety.dart';
@@ -56,6 +59,7 @@ Future<void> main() async {
   final onboardingRepo = buildOnboardingRepository(api);
   final profileRepo = buildProfileRepository(api);
   final recordsRepo = buildRecordsRepository(api);
+  final deviceTokenRepo = buildDeviceTokenRepository(api);
   final reminderScheduler = InMemoryReminderScheduler();
   final connectivity = ConnectivityPlusWatcher();
   // Production-only: registers the file_picker-backed upload helper for
@@ -70,6 +74,14 @@ Future<void> main() async {
     onboardingRepository: onboardingRepo,
     profileRepository: profileRepo,
     recordsRepository: recordsRepo,
+    deviceTokenRepository: deviceTokenRepo,
+    // Slice 16 — Option A wiring: the seam returns null today. A future
+    // micro-slice swaps `nullPushTokenProvider` for a
+    // `FirebaseMessaging.instance.getToken`-backed adapter once the
+    // Firebase project / config files are provisioned. The post-login
+    // registration step skips when this returns null, so the resident
+    // path stays fully functional with no Firebase wired.
+    pushTokenProvider: nullPushTokenProvider,
     medicineControllerBuilder: () =>
         buildMedicineController(api, reminderScheduler: reminderScheduler),
     emergencyControllerBuilder: () => EmergencyApi(
@@ -107,6 +119,8 @@ class MedEmergencyApp extends StatelessWidget {
     this.profileRepository,
     this.recordsRepository,
     this.medicineControllerBuilder,
+    this.deviceTokenRepository,
+    this.pushTokenProvider,
   });
 
   final UriLauncher launcher;
@@ -155,6 +169,15 @@ class MedEmergencyApp extends StatelessWidget {
   final RecordsRepository? recordsRepository;
   final MedicineController Function()? medicineControllerBuilder;
 
+  /// Slice 16 — push delivery seam. The repo wraps the
+  /// `/me/device-tokens` and `/notifications/fcm/ack` endpoints; the
+  /// provider returns the current FCM token (today: `nullPushTokenProvider`
+  /// — see `push/push_token_provider.dart` for the Option-A deferred
+  /// wiring). Production calls the pair after a successful login /
+  /// onboarding to register the resident's device with the backend.
+  final DeviceTokenRepository? deviceTokenRepository;
+  final PushTokenProvider? pushTokenProvider;
+
   @override
   Widget build(BuildContext context) {
     // Brief §11 elderly-UX defaults: 18sp body, 22sp emphasis, primary
@@ -196,6 +219,8 @@ class MedEmergencyApp extends StatelessWidget {
         profileRepository: profileRepository,
         recordsRepository: recordsRepository,
         medicineControllerBuilder: medicineControllerBuilder,
+        deviceTokenRepository: deviceTokenRepository,
+        pushTokenProvider: pushTokenProvider,
       ),
     );
   }
@@ -224,6 +249,8 @@ class SplashScreen extends StatefulWidget {
     this.profileRepository,
     this.recordsRepository,
     this.medicineControllerBuilder,
+    this.deviceTokenRepository,
+    this.pushTokenProvider,
   });
 
   final UriLauncher launcher;
@@ -255,6 +282,12 @@ class SplashScreen extends StatefulWidget {
   final RecordsRepository? recordsRepository;
   final MedicineController Function()? medicineControllerBuilder;
 
+  /// Slice 16 — push delivery seam. Production wires the
+  /// `DeviceTokenRepository` + a real `PushTokenProvider`; the
+  /// post-login flow calls them once a token is available.
+  final DeviceTokenRepository? deviceTokenRepository;
+  final PushTokenProvider? pushTokenProvider;
+
   @override
   State<SplashScreen> createState() => _SplashScreenState();
 }
@@ -278,6 +311,11 @@ class _SplashScreenState extends State<SplashScreen> {
     final effectiveConnectivity =
         widget.connectivity ?? InMemoryConnectivityWatcher();
     if (user != null && user.role == 'resident') {
+      // Best-effort device-token registration: fire-and-forget so a
+      // failed registration never blocks the home-screen handoff. The
+      // backend already considers SMS + voice as fallbacks for any
+      // missing FCM channel (Slice 6 fan-out invariant).
+      unawaited(_registerPushTokenIfAvailable());
       Navigator.of(context).pushReplacement(
         MaterialPageRoute<void>(
           builder: (_) => HomeShell(
@@ -295,6 +333,28 @@ class _SplashScreenState extends State<SplashScreen> {
     // resident app — render the public splash so emergency entry stays
     // reachable. The legacy splash content takes over on the next frame.
     setState(() => _bootstrapping = false);
+  }
+
+  /// Slice 16: best-effort post-login push token registration. Pulls the
+  /// current FCM token from [PushTokenProvider]; when it's null (the
+  /// Option-A default until Firebase config files arrive), this method
+  /// becomes a no-op. Errors are swallowed — a failed registration is
+  /// not a blocker because the Slice 6 fan-out still has SMS + voice as
+  /// fallbacks for any missing FCM channel.
+  Future<void> _registerPushTokenIfAvailable() async {
+    final repo = widget.deviceTokenRepository;
+    final provider = widget.pushTokenProvider;
+    if (repo == null || provider == null) return;
+    try {
+      final token = await provider();
+      if (token == null || token.isEmpty) return;
+      await repo.registerToken(
+        token: token,
+        platform: defaultDevicePlatform(),
+      );
+    } catch (_) {
+      // Intentionally swallow — see method docstring.
+    }
   }
 
   void _openEmergency(BuildContext context) {
@@ -329,6 +389,7 @@ class _SplashScreenState extends State<SplashScreen> {
           onSubmit: widget.loginSubmit,
           authRepository: repo,
           onAuthenticated: (loginContext) {
+            unawaited(_registerPushTokenIfAvailable());
             Navigator.of(loginContext).pushReplacement(
               MaterialPageRoute<void>(
                 builder: (_) => HomeShell(
@@ -350,6 +411,7 @@ class _SplashScreenState extends State<SplashScreen> {
                         repository: onboardingRepo,
                         connectivity: effectiveConnectivity,
                         onComplete: (onboardCtx) {
+                          unawaited(_registerPushTokenIfAvailable());
                           Navigator.of(onboardCtx).pushReplacement(
                             MaterialPageRoute<void>(
                               builder: (_) => HomeShell(

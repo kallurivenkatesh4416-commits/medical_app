@@ -678,6 +678,16 @@ def test_live_twilio_whatsapp_posts_messages_endpoint_with_whatsapp_prefix(
         twilio_sms_from = "+15550000000"
         twilio_voice_from = "+15550000001"
         twilio_whatsapp_from = "whatsapp:+14155238886"
+        # Slice 16: leaving the status callback empty keeps this test
+        # focused on the WhatsApp send path; the callback URL surface
+        # has its own coverage in test_notifications_webhooks.py.
+        twilio_status_callback_url = None
+        # Slice 16: live composite gateway also constructs an FcmPushGateway
+        # at get_notification_gateway() time; the fields are read lazily so
+        # leaving them blank only affects `send_push`, which this test does
+        # not exercise.
+        fcm_service_account_file = None
+        fcm_project_id = None
 
     monkeypatch.setattr(notifications, "get_settings", lambda: _FakeSettings())
 

@@ -172,11 +172,38 @@ class EmergencyKpiOut(BaseModel):
 @router.post("/devices/push-token", response_model=PushTokenOut)
 def register_push_token(
     body: PushTokenIn,
+    request: Request,
     user: User = Depends(alert_feed_roles),
     session: Session = Depends(get_db),
 ) -> PushTokenOut:
     emergency_service.register_push_token(
-        session, user=user, token=body.token, platform=body.platform
+        session,
+        user=user,
+        token=body.token,
+        platform=body.platform,
+        from_ip=client_ip(request),
+    )
+    return PushTokenOut()
+
+
+@router.post("/me/device-tokens", response_model=PushTokenOut)
+def register_my_device_token(
+    body: PushTokenIn,
+    request: Request,
+    user: User = Depends(resident_only),
+    session: Session = Depends(get_db),
+) -> PushTokenOut:
+    """Slice 16 — resident-side counterpart to ``/devices/push-token``.
+    Both endpoints share the same service function (upsert by token,
+    audit, tenant-scoped). The staff endpoint stays for doctors/nurses/ops
+    who register tokens via the dashboard; this one is what the Slice 14
+    Flutter app calls once a Firebase token is available."""
+    emergency_service.register_push_token(
+        session,
+        user=user,
+        token=body.token,
+        platform=body.platform,
+        from_ip=client_ip(request),
     )
     return PushTokenOut()
 

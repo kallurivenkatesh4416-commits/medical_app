@@ -51,11 +51,36 @@
 - **Surfaced in:** Slice 12 / `apps/mobile/lib/emergency.dart`,
   `apps/mobile/lib/emergency_api.dart`, `app/services/emergency_service.py`
 
-### `[NEEDS_OPS_DECISION]` <short title>
-- **Question:** …
-- **Why it matters:** …
-- **Technical default applied:** … (so build continues)
-- **Surfaced in:** Slice N / file
+### `[RESOLVED-SLICE-16]` Live FCM HTTP v1 push wiring (backend)
+- **Original question:** When the operator provides a Firebase service-
+  account file, what is the smallest-blast-radius way to wire FCM HTTP
+  v1 alongside the live Twilio gateway?
+- **Resolution:** Slice 16 lands `FcmPushGateway` using `google-auth`
+  for credential refresh + composite `CompositeGateway` that joins FCM
+  (push) and Twilio (SMS / voice / WhatsApp). A missing service-account
+  file or project id raises at send-time only — the Slice 6 fan-out
+  records FCM as failed without blocking SMS / voice.
+- **Surfaced in:** Slice 16 / `apps/backend/app/services/fcm.py`,
+  `apps/backend/app/services/notifications.py`
+
+### `[NEEDS_OPS_DECISION]` Mobile Firebase project provisioning
+- **Question:** When does the Firebase project + Android / iOS config
+  files (`google-services.json` / `GoogleService-Info.plist`) get
+  provisioned? This is the only remaining blocker before residents'
+  devices can register FCM tokens.
+- **Why it matters:** Without a real Firebase project, the
+  `PushTokenProvider` seam stays at `nullPushTokenProvider` (Slice 16
+  Option A). Token registration becomes a hard no-op and the FCM
+  channel of the Slice 6 fan-out always records "no_push_token". SMS
+  and voice continue to work — the §14 DoD #2 ten-second SLA is met by
+  the other two channels — but real-device push remains untested.
+- **Technical default applied:** Slice 16 lands the mobile seam
+  (`lib/push/push_token_provider.dart`, `lib/push/device_token_repository.dart`)
+  and the post-login registration call site. A future ~30-line slice
+  swaps in a `FirebaseMessaging.instance.getToken` adapter once the
+  Firebase project is provisioned and the config files are dropped
+  into `android/app/` and `ios/Runner/`.
+- **Surfaced in:** Slice 16 / `apps/mobile/lib/push/push_token_provider.dart`
 
 ## Technical hardening backlog (non-blocking, `[HARDENING]`)
 

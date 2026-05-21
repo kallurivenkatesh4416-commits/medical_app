@@ -101,6 +101,29 @@ Then:
   with `POST /api/v1/emergency/notifications/requeue-stuck`; the age gate is
   `NOTIFICATION_STUCK_CLAIM_SECONDS`. The load/2G/coverage proof is in
   `docs/slice12-hardening-report.md`.
+- Slice 16: production push + delivery webhooks. FCM HTTP v1 push lands
+  via `FcmPushGateway` (uses the `google-auth` library for service-account
+  credentials and OAuth2 token refresh — set `FCM_SERVICE_ACCOUNT_FILE`
+  and `FCM_PROJECT_ID` in `PROVIDER_MODE=live`). `CompositeGateway` joins
+  FCM (push) and Twilio (SMS / voice / WhatsApp) behind the
+  `NotificationGateway` protocol — the Slice 6 fan-out's
+  "one channel down, other two still fire" invariant is preserved
+  because each channel's exception stays caught per attempt. Twilio
+  status callbacks land at `POST /api/v1/notifications/twilio/status`
+  (set `TWILIO_STATUS_CALLBACK_URL` to a publicly-reachable HTTPS URL;
+  the handler validates `X-Twilio-Signature` with the configured auth
+  token before updating `notification_attempts.status` to
+  delivered/failed). FCM delivery acks land at
+  `POST /api/v1/notifications/fcm/ack` — resident-auth gated,
+  owner-only, idempotent (a second ack from the same device is a no-op).
+  Residents now register their own device tokens via
+  `POST /api/v1/me/device-tokens` (the staff `/devices/push-token`
+  endpoint stays unchanged). Mobile side: `PushTokenProvider` and
+  `DeviceTokenRepository` seams + `nullPushTokenProvider` default —
+  Option A wiring per the slice-scoping decision, so installing
+  `firebase_messaging` plus dropping in `google-services.json` /
+  `GoogleService-Info.plist` is a separate micro-slice once the
+  Firebase project is provisioned.
 - Slice 14: mobile resident path. The app is now demoable end-to-end on a
   real Android device. OTP login is wired against `POST /auth/otp/request`
   + `POST /auth/otp/verify`; tokens live in `flutter_secure_storage`
@@ -157,7 +180,7 @@ real SMS provider. Seeded demo phones are `+15550000001`…`+15550000009`
 See `.env.example` (annotated). Provider keys (Twilio/FCM/AWS) are only needed from
 the slice that uses them; default `PROVIDER_MODE=stub` needs no external accounts.
 
-_Status: Slices 1-14 cover backend foundation, auth/RBAC/audit,
+_Status: Slices 1-16 cover backend foundation, auth/RBAC/audit,
 onboarding/consent/profile, medical-record upload/list/link, the emergency
 happy path with dashboard feed, emergency hardening (3-channel fan-out,
 on-call resolution, 60s backup escalation, mobile offline retry + fallback
@@ -171,6 +194,13 @@ Slice 12 emergency hardening (fallback-tap outbox, stuck-notification reaper,
 mobile resident-path wire-up (OTP login, onboarding wizard, live medicine /
 records / consent surfaces, real `flutter_secure_storage` / `path_provider`
 / `connectivity_plus` / `file_picker`, and live access-token threading
-through the Slice 6 emergency API). Live Twilio (SMS / voice / WhatsApp) +
-live SMTP are wired and configured per `.env.example`; live FCM push is a
-separate operator-keys task (Slice 16)._
+through the Slice 6 emergency API), and Slice 16 production push +
+delivery webhooks (FCM HTTP v1 via `google-auth`, composite gateway
+joining FCM and Twilio, Twilio status callback handler with signature
+validation, resident-side FCM ack endpoint, resident `/me/device-tokens`
+endpoint with audit, and a deferred-by-design mobile FCM seam). Live
+Twilio (SMS / voice / WhatsApp), live SMTP, and live FCM are wired and
+configured per `.env.example`. The only remaining operator-keys task is
+mobile Firebase project provisioning (Option A defer): a future
+micro-slice swaps `nullPushTokenProvider` for a `firebase_messaging`
+adapter once `google-services.json` / `GoogleService-Info.plist` land._

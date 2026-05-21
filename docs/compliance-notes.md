@@ -388,6 +388,60 @@
   records the emergency load smoke, 2G latency simulation, offline fallback
   verification, and the 92.53% emergency API/service coverage gate.
 
+## Slice 16 implementation notes (push delivery + webhooks)
+
+- **FCM HTTP v1 with `google-auth` for credential refresh.** The Slice
+  6 placeholder (`send_push` raising) is replaced with a real
+  `FcmPushGateway` that loads the service account file, mints OAuth2
+  access tokens via the official library, and POSTs to
+  `/v1/projects/{project_id}/messages:send`. A single forced refresh +
+  retry on 401 recovers from clock-skew without bubbling a permanent
+  failure to the fan-out. A missing service-account file or project id
+  raises `FcmConfigError` *at send time only* — the composite gateway
+  still constructs at startup, and the Slice 6 fan-out catches the
+  exception per attempt so SMS + voice continue uninterrupted (the
+  "one channel down, other two still fire" invariant holds).
+- **No PHI in any push body.** The push notification continues to
+  carry only the constant alert title + body ("A resident needs
+  medical help, open the app"). The new `data` payload carries a
+  `provider_ref_marker` only — never symptoms, vitals, or history.
+- **Twilio status callbacks are signature-validated.** Every webhook
+  POST to `/api/v1/notifications/twilio/status` runs through
+  `verify_twilio_signature` (HMAC-SHA1 of URL + sorted form params,
+  keyed by the Twilio auth token; constant-time compare). An invalid
+  signature is `403 invalid_twilio_signature`; an unknown sid is `200
+  matched: false` (Twilio retries on non-2xx forever, which would
+  flood the log). The handler is idempotent — a retry of the same
+  `delivered` event is a no-op, no duplicate audit row.
+- **FCM ack is resident-owned.** `/api/v1/notifications/fcm/ack` is
+  resident-auth gated and refuses to update an attempt whose
+  `recipient_id` is not the actor (`404
+  notification_attempt_not_found`, no existence leak — matches the
+  Slice 3/4/6 tenant-isolation pattern). Idempotent: a second ack
+  from the same device is a no-op.
+- **`/me/device-tokens` opens token registration to residents** while
+  the staff `/devices/push-token` endpoint stays untouched (it still
+  refuses residents with 403, so the RBAC contract is unchanged for
+  callers that already depend on it). Both endpoints share the same
+  `register_push_token` service and now write a
+  `DEVICE_TOKEN_REGISTERED` audit row carrying the platform but
+  **never the token value** (same DPDP discipline as the Slice 6
+  notification_attempts rows that record `provider_ref` but not message
+  bodies).
+- **New audit actions** mirrored in `packages/shared-types/src/enums.ts`:
+  `DEVICE_TOKEN_REGISTERED`, `EMERGENCY_NOTIFICATION_STATUS_UPDATED`,
+  `EMERGENCY_NOTIFICATION_ACK_RECEIVED`. The status-update row records
+  `{from_status, to_status, channel, provider_ref}` so the audit trail
+  carries the delivery history without leaking PHI.
+- **Mobile FCM depth: Option A (seam only).** `PushTokenProvider` and
+  `DeviceTokenRepository` are wired through `main.dart`; the default
+  provider returns null, so the resident path stays fully functional
+  without a Firebase project. A future micro-slice swaps in a
+  `FirebaseMessaging.instance.getToken`-backed adapter once
+  `google-services.json` / `GoogleService-Info.plist` land. This
+  defers the Firebase native-config / CI risk per `PROJECT_BRIEF.md`
+  §13 ("hide vendor-specific wiring behind a stable interface").
+
 ## Open questions — `[NEEDS_LEGAL_REVIEW]`
 
 1. `[NEEDS_LEGAL_REVIEW]` DPDP cross-border data: acceptable AWS S3 region for

@@ -28,7 +28,20 @@ class Settings(BaseSettings):
     twilio_auth_token: str | None = None
     twilio_sms_from: str | None = None
     twilio_voice_from: str | None = None
+    # Slice 16: when set, the live Twilio gateway passes this URL as the
+    # `StatusCallback` on every send so the provider posts delivery state
+    # back to us. The webhook handler is signature-validated; leaving this
+    # blank disables callbacks entirely (the existing `sent` status from
+    # the synchronous REST call is the only signal). Required for live
+    # delivery tracking; optional in stub/dev mode.
+    twilio_status_callback_url: str | None = None
     fcm_service_account_file: str | None = None
+    # Slice 16: GCP project id for the FCM HTTP v1 send URL
+    # (`/v1/projects/{project_id}/messages:send`). The service account
+    # file knows its own project, but FCM requires the project be named in
+    # the URL too. Required only when `provider_mode='live'` and FCM is
+    # enabled.
+    fcm_project_id: str | None = None
 
     # --- Emergency policy (technical defaults; ops decisions in open-questions) ---
     # No server `acknowledged` within this window -> backup escalation + the

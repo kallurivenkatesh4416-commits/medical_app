@@ -199,3 +199,7 @@ class AuditAction(StrEnum):
     # Slice 10 — aggregate-only admin dashboard and monthly exports.
     ADMIN_KPI_READ = "admin_kpi_read"
     ADMIN_EXPORT_GENERATED = "admin_export_generated"
+    # Slice 16 — push delivery surfaces.
+    DEVICE_TOKEN_REGISTERED = "device_token_registered"
+    EMERGENCY_NOTIFICATION_STATUS_UPDATED = "emergency_notification_status_updated"
+    EMERGENCY_NOTIFICATION_ACK_RECEIVED = "emergency_notification_ack_received"

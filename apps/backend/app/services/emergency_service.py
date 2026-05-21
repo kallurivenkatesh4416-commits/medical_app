@@ -122,7 +122,12 @@ class NoteInput:
 
 
 def register_push_token(
-    session: Session, *, user: User, token: str, platform: str
+    session: Session,
+    *,
+    user: User,
+    token: str,
+    platform: str,
+    from_ip: str | None = None,
 ) -> DeviceToken:
     token = token.strip()
     platform = platform.strip() or "web"
@@ -150,6 +155,25 @@ def register_push_token(
         row.disabled_at = None
         row.last_seen_at = now
     session.add(row)
+    # Flush first so the row id is populated before audit (the create-alert
+    # pattern from this file is the same: add -> flush -> derived rows).
+    session.flush()
+    # Slice 16: every registration is audited so a future device-rotation
+    # incident has a trail (who registered which platform when, never the
+    # token value — that's the same PHI-discipline as the Slice 6
+    # notification_attempts rows).
+    record_audit(
+        session,
+        action=AuditAction.DEVICE_TOKEN_REGISTERED,
+        actor_user_id=user.id,
+        project_id=user.project_id,
+        resource_type="device_token",
+        resource_id=str(row.id),
+        from_ip=from_ip,
+        purpose="emergency.device_token_register",
+        meta={"platform": platform},
+        commit=False,
+    )
     session.commit()
     session.refresh(row)
     return row
@@ -1221,3 +1245,142 @@ def record_fallback(
             409, "fallback_record_conflict", "Fallback tap could not be recorded."
         ) from exc
     return {"case_id": case.id, "channel": channel.value, "recorded": True}
+
+
+# --------------------------------------------------------------------------- #
+# Slice 16 — delivery webhooks                                                #
+# --------------------------------------------------------------------------- #
+
+
+def _find_attempt_by_provider_ref(
+    session: Session, *, provider_ref: str, channel: str | None = None
+) -> NotificationAttempt | None:
+    """Look up a `notification_attempts` row by the provider's reference.
+    FCM stores `projects/<id>/messages/<msg>` and Twilio stores its sid;
+    both are unique within their channel — for safety we filter by
+    channel when the caller knows which one to expect."""
+    if not provider_ref:
+        return None
+    stmt = select(NotificationAttempt).where(
+        NotificationAttempt.provider_ref == provider_ref
+    )
+    if channel is not None:
+        stmt = stmt.where(NotificationAttempt.channel == channel)
+    return session.exec(stmt).first()
+
+
+_TERMINAL_STATUSES = {
+    NotificationStatus.DELIVERED.value,
+    NotificationStatus.FAILED.value,
+}
+
+
+def apply_provider_status(
+    session: Session,
+    *,
+    provider_ref: str,
+    channel: str,
+    new_status: NotificationStatus,
+    error: str | None,
+    from_ip: str | None,
+) -> NotificationAttempt | None:
+    """Webhook-driven status transition for ``notification_attempts``.
+    Idempotent: a Twilio retry of the same event re-finds the row already
+    in the target state and writes no second audit row.
+
+    Returns the updated attempt, or None if the provider_ref does not
+    match any known row (the webhook handler turns that into a 404 so
+    a misconfigured callback URL is visible)."""
+    attempt = _find_attempt_by_provider_ref(
+        session, provider_ref=provider_ref, channel=channel
+    )
+    if attempt is None:
+        return None
+    # Idempotency: if the row is already in this terminal state, skip the
+    # write entirely. Twilio retries `delivered` -> `delivered`; FCM acks
+    # the same provider_ref twice; both must be no-ops.
+    if attempt.status == new_status.value:
+        return attempt
+    # Refuse to walk back from a terminal state. A late "sending" event
+    # from Twilio after we already saw "delivered" stays a no-op.
+    if attempt.status in _TERMINAL_STATUSES and new_status not in (
+        NotificationStatus.DELIVERED,
+        NotificationStatus.FAILED,
+    ):
+        return attempt
+    previous = attempt.status
+    attempt.status = new_status.value
+    if error:
+        attempt.error = error[:240]  # bounded so audit stays compact
+    elif new_status is NotificationStatus.DELIVERED:
+        attempt.error = None
+    attempt.attempted_at = utcnow()
+    session.add(attempt)
+    record_audit(
+        session,
+        action=AuditAction.EMERGENCY_NOTIFICATION_STATUS_UPDATED,
+        actor_user_id=None,  # webhook is unauthenticated by design
+        project_id=attempt.project_id,
+        resource_type="notification_attempt",
+        resource_id=str(attempt.id),
+        from_ip=from_ip,
+        purpose="emergency.notification_status_webhook",
+        meta={
+            "channel": channel,
+            "from_status": previous,
+            "to_status": new_status.value,
+            # Provider ref is opaque (Twilio sid / FCM message name);
+            # storing it makes the trail searchable without leaking PHI.
+            "provider_ref": provider_ref,
+        },
+        commit=False,
+    )
+    session.commit()
+    session.refresh(attempt)
+    return attempt
+
+
+def acknowledge_fcm_delivery(
+    session: Session,
+    *,
+    user: User,
+    provider_ref: str,
+    from_ip: str | None,
+) -> NotificationAttempt:
+    """Slice 16 — mobile device confirms an FCM push arrived. Owner-only:
+    the resident POSTing the ack must be the originally-targeted
+    recipient (`notification_attempts.recipient_id`). A non-owner gets
+    404 with no existence leak, matching the Slice 3/4/6 tenant-isolation
+    pattern."""
+    attempt = _find_attempt_by_provider_ref(
+        session, provider_ref=provider_ref, channel=NotificationChannel.FCM.value
+    )
+    if attempt is None or attempt.recipient_id != user.id:
+        raise AuthError(404, "notification_attempt_not_found", "Unknown notification.")
+    # Idempotent: a second ack from the same device is a no-op.
+    if attempt.status == NotificationStatus.DELIVERED.value:
+        return attempt
+    previous = attempt.status
+    attempt.status = NotificationStatus.DELIVERED.value
+    attempt.error = None
+    attempt.attempted_at = utcnow()
+    session.add(attempt)
+    record_audit(
+        session,
+        action=AuditAction.EMERGENCY_NOTIFICATION_ACK_RECEIVED,
+        actor_user_id=user.id,
+        project_id=attempt.project_id,
+        resource_type="notification_attempt",
+        resource_id=str(attempt.id),
+        from_ip=from_ip,
+        purpose="emergency.notification_fcm_ack",
+        meta={
+            "from_status": previous,
+            "to_status": NotificationStatus.DELIVERED.value,
+            "provider_ref": provider_ref,
+        },
+        commit=False,
+    )
+    session.commit()
+    session.refresh(attempt)
+    return attempt
