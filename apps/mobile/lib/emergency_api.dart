@@ -4,14 +4,30 @@ import 'dart:io';
 
 import 'emergency.dart';
 
+/// Default filename for the pending-alert outbox. Kept stable so a user
+/// upgrading the app does not lose an in-flight emergency idempotency key.
+const String _kPendingAlertFileName = 'med_emergency_pending.json';
+
+/// Default filename for the fallback-tap outbox (Slice 12).
+const String _kFallbackTapsFileName = 'med_emergency_fallback_taps.json';
+
+/// Resolves the file path for an emergency-outbox file. Production wires
+/// this to an app-private directory via `path_provider`
+/// (`getApplicationSupportDirectory`) at app startup; tests / dev fall
+/// back to `Directory.systemTemp` so widget tests need no platform mocks.
+File pendingAlertFileIn(Directory dir) =>
+    File('${dir.path}/$_kPendingAlertFileName');
+
+File fallbackTapsFileIn(Directory dir) =>
+    File('${dir.path}/$_kFallbackTapsFileName');
+
 /// Disk-backed [PendingAlertStore]. Survives an app kill so an alert started
 /// while offline is resumed (with the same idempotency key) on next launch.
 /// Defaults under the OS temp dir so no `path_provider` dependency is needed;
 /// production can pass an app-private dir once that wiring lands.
 class FilePendingAlertStore implements PendingAlertStore {
   FilePendingAlertStore({File? file})
-      : _file = file ??
-            File('${Directory.systemTemp.path}/med_emergency_pending.json');
+      : _file = file ?? pendingAlertFileIn(Directory.systemTemp);
 
   final File _file;
 
@@ -56,8 +72,7 @@ class FilePendingAlertStore implements PendingAlertStore {
 
 class FileFallbackTapStore implements FallbackTapStore {
   FileFallbackTapStore({File? file})
-      : _file = file ??
-            File('${Directory.systemTemp.path}/med_emergency_fallback_taps.json');
+      : _file = file ?? fallbackTapsFileIn(Directory.systemTemp);
 
   final File _file;
 
@@ -123,22 +138,39 @@ class EmergencyApi {
   EmergencyApi({
     this.baseUrl = 'http://localhost:8000',
     this.accessToken,
-  });
+    this.tokenProvider,
+    Directory? appPrivateDir,
+  }) : _appPrivateDir = appPrivateDir;
 
   final String baseUrl;
   final String? accessToken;
 
-  Map<String, String> get _headers => {
-        'content-type': 'application/json',
-        if (accessToken != null) 'authorization': 'Bearer $accessToken',
-      };
+  /// Slice 14 — reads the live access token on every call so a post-login
+  /// rotation is picked up without rebuilding the controller. Falls back
+  /// to [accessToken] when null (test path). Production wires this to
+  /// `AuthStorage.readAccessToken`.
+  final Future<String?> Function()? tokenProvider;
+
+  // App-private directory for the durable outboxes. When null,
+  // `buildController` falls back to `Directory.systemTemp` so widget tests
+  // run with no `path_provider` MethodChannel mock.
+  final Directory? _appPrivateDir;
+
+  Future<Map<String, String>> _buildHeaders() async {
+    final live = await tokenProvider?.call();
+    final token = (live != null && live.isNotEmpty) ? live : accessToken;
+    return {
+      'content-type': 'application/json',
+      if (token != null && token.isNotEmpty) 'authorization': 'Bearer $token',
+    };
+  }
 
   Future<AlertResult> sendAlert(String idempotencyKey) async {
     final client = HttpClient();
     try {
       final req = await client
           .postUrl(Uri.parse('$baseUrl/api/v1/emergency/alerts'));
-      _headers.forEach(req.headers.set);
+      (await _buildHeaders()).forEach(req.headers.set);
       req.headers.set('idempotency-key', idempotencyKey);
       req.add(utf8.encode(jsonEncode({'symptom_codes': <String>[]})));
       final resp = await req.close();
@@ -160,7 +192,7 @@ class EmergencyApi {
       final req = await client.getUrl(
         Uri.parse('$baseUrl/api/v1/emergency/alerts/$caseId/status'),
       );
-      _headers.forEach(req.headers.set);
+      (await _buildHeaders()).forEach(req.headers.set);
       final resp = await req.close();
       if (resp.statusCode != 200) return false;
       final j = jsonDecode(await resp.transform(utf8.decoder).join());
@@ -178,7 +210,7 @@ class EmergencyApi {
       final req = await client.getUrl(
         Uri.parse('$baseUrl/api/v1/emergency/alerts/$caseId/fallback-numbers'),
       );
-      _headers.forEach(req.headers.set);
+      (await _buildHeaders()).forEach(req.headers.set);
       final resp = await req.close();
       if (resp.statusCode != 200) return FallbackNumbers.offline;
       final j = jsonDecode(await resp.transform(utf8.decoder).join());
@@ -206,7 +238,7 @@ class EmergencyApi {
       final req = await client.postUrl(
         Uri.parse('$baseUrl/api/v1/emergency/alerts/$caseId/fallback'),
       );
-      _headers.forEach(req.headers.set);
+      (await _buildHeaders()).forEach(req.headers.set);
       req.headers.set('idempotency-key', idempotencyKey);
       req.add(utf8.encode(jsonEncode({'channel': channel})));
       final resp = await req.close();
@@ -221,12 +253,15 @@ class EmergencyApi {
     }
   }
 
-  EmergencyController buildController() => EmergencyController(
-        sender: sendAlert,
-        ackChecker: isAcknowledged,
-        numbersFetcher: fallbackNumbers,
-        recorder: recordFallback,
-        store: FilePendingAlertStore(),
-        fallbackStore: FileFallbackTapStore(),
-      );
+  EmergencyController buildController() {
+    final dir = _appPrivateDir ?? Directory.systemTemp;
+    return EmergencyController(
+      sender: sendAlert,
+      ackChecker: isAcknowledged,
+      numbersFetcher: fallbackNumbers,
+      recorder: recordFallback,
+      store: FilePendingAlertStore(file: pendingAlertFileIn(dir)),
+      fallbackStore: FileFallbackTapStore(file: fallbackTapsFileIn(dir)),
+    );
+  }
 }

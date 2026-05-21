@@ -25,18 +25,18 @@
 - **Surfaced in:** Slice 6 / `app/services/emergency_service.py`,
   `app/api/emergency.py`
 
-### `[NEEDS_OPS_DECISION]` Mobile pending-alert store location
-- **Question:** Where should the durable pending-alert file live in
+### `[RESOLVED-SLICE-14]` Mobile pending-alert store location
+- **Original question:** Where should the durable pending-alert file live in
   production — an app-private directory (via `path_provider`) rather than the
   OS temp dir?
-- **Why it matters:** The Slice 6 review made the offline alert durable
-  (`FilePendingAlertStore`, idempotency key persisted until the server
-  confirms, resumed on launch). The default path is `Directory.systemTemp` to
-  avoid a `path_provider` dependency now; the OS may evict temp files.
-- **Technical default applied:** file-backed store under systemTemp, injected
-  into the controller; production swaps in an app-private dir once the mobile
-  storage dependency lands. Behaviour and tests are unchanged by the path.
-- **Surfaced in:** Slice 6 review / `apps/mobile/lib/emergency_api.dart`
+- **Resolution:** Slice 14 wires `path_provider`'s
+  `getApplicationSupportDirectory()` in `main()` and threads the resulting
+  path through `EmergencyApi(appPrivateDir: …)` to both the
+  `FilePendingAlertStore` and `FileFallbackTapStore`. The OS temp dir
+  remains the test fallback (no platform binding required), so widget
+  tests still run with no `path_provider` MethodChannel mock.
+- **Surfaced in:** Slice 14 / `apps/mobile/lib/main.dart`,
+  `apps/mobile/lib/emergency_api.dart`
 
 ### `[RESOLVED-SLICE-12]` Mobile fallback-tap offline durability
 - **Original question:** When a fallback button is tapped with no connectivity,

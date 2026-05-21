@@ -101,6 +101,24 @@ Then:
   with `POST /api/v1/emergency/notifications/requeue-stuck`; the age gate is
   `NOTIFICATION_STUCK_CLAIM_SECONDS`. The load/2G/coverage proof is in
   `docs/slice12-hardening-report.md`.
+- Slice 14: mobile resident path. The app is now demoable end-to-end on a
+  real Android device. OTP login is wired against `POST /auth/otp/request`
+  + `POST /auth/otp/verify`; tokens live in `flutter_secure_storage`
+  (Keystore on Android, Keychain on iOS); `connectivity_plus` drives the
+  Slice 11 offline banner; `path_provider` backs the Slice 6 emergency
+  outbox so the pending-alert idempotency key now lives in an
+  app-private directory (resolves `[NEEDS_OPS_DECISION]` in
+  `docs/open-questions.md`). The onboarding wizard walks disclaimer →
+  profile → contacts → medical history → consents and submits one atomic
+  payload (`POST /onboarding/complete`) with an `Idempotency-Key`. On
+  HomeShell, the resident sees their own medicine schedule (with
+  per-dose "I took it" / "Skip" buttons), their uploaded medical records
+  (open via 15-min signed link), and their consent toggles (live
+  `PATCH /me/consents/{type}`); record upload uses `file_picker`. The
+  EmergencyApi now reads the live access token on every call via a
+  `tokenProvider` closure so a post-login rotation is picked up without
+  rebuilding the controller. Run `flutter run --dart-define=API_BASE_URL=http://10.0.2.2:8000`
+  against an emulator (or your backend's LAN IP for a real device).
 
 ### PDF renderer — WeasyPrint → xhtml2pdf substitution
 
@@ -139,7 +157,7 @@ real SMS provider. Seeded demo phones are `+15550000001`…`+15550000009`
 See `.env.example` (annotated). Provider keys (Twilio/FCM/AWS) are only needed from
 the slice that uses them; default `PROVIDER_MODE=stub` needs no external accounts.
 
-_Status: Slices 1-12 cover backend foundation, auth/RBAC/audit,
+_Status: Slices 1-14 cover backend foundation, auth/RBAC/audit,
 onboarding/consent/profile, medical-record upload/list/link, the emergency
 happy path with dashboard feed, emergency hardening (3-channel fan-out,
 on-call resolution, 60s backup escalation, mobile offline retry + fallback
@@ -147,8 +165,12 @@ sheet), case lifecycle/vitals/notes/aggregate KPIs, hospital handover
 PDF (xhtml2pdf, 15-minute signed link, email + WhatsApp dispatch), and
 medicine reminders (resident schedules, device-local reminders, taken/
 skipped logs, doctor adherence view, handover §6 wire-in), and the
-PHI-free admin dashboard with monthly PDF/CSV export, mobile polish, and
+PHI-free admin dashboard with monthly PDF/CSV export, mobile polish,
 Slice 12 emergency hardening (fallback-tap outbox, stuck-notification reaper,
-2G/load tests, and 92.53% emergency API/service coverage). Live Twilio (SMS /
-voice / WhatsApp) + live SMTP are wired and configured per `.env.example`;
-live FCM push is a separate operator-keys task._
+2G/load tests, and 92.53% emergency API/service coverage), and Slice 14
+mobile resident-path wire-up (OTP login, onboarding wizard, live medicine /
+records / consent surfaces, real `flutter_secure_storage` / `path_provider`
+/ `connectivity_plus` / `file_picker`, and live access-token threading
+through the Slice 6 emergency API). Live Twilio (SMS / voice / WhatsApp) +
+live SMTP are wired and configured per `.env.example`; live FCM push is a
+separate operator-keys task (Slice 16)._

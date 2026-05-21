@@ -11,6 +11,15 @@ dependencies:
   flutter:
     sdk: flutter
   url_launcher: ^6.3.0
+  # Slice 14 — resident path on a real Android device.
+  # Every plugin sits behind a seam (see lib/api_client.dart, lib/auth/,
+  # lib/connectivity.dart, lib/emergency_api.dart, lib/records_repo.dart)
+  # so widget tests inject in-memory fakes and never touch a platform
+  # channel; flutter_test stays green with no MethodChannel mocks.
+  flutter_secure_storage: ^9.2.2
+  path_provider: ^2.1.4
+  connectivity_plus: ^6.0.5
+  file_picker: ^8.1.2
 
 dev_dependencies:
   flutter_test:

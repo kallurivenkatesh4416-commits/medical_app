@@ -1,10 +1,9 @@
 /// `ConnectivityWatcher` seam for the Slice 11 offline indicator.
 ///
-/// Same shape as `LocalReminderScheduler` in `medicine.dart` — the
-/// production wiring is a Phase-2 task (Flutter platform channels via
-/// `connectivity_plus` or equivalent). Adding the real dependency before
-/// platform-native channels are configured would fail `flutter test` on
-/// CI; the in-memory stub keeps the contract testable today.
+/// Slice 14 lands the real `connectivity_plus`-backed implementation behind
+/// the same seam, so `flutter run` on a real Android device reflects actual
+/// network state while `flutter test` continues to use [InMemoryConnectivityWatcher]
+/// (no platform channel mocks needed).
 ///
 /// The seam exposes an observable boolean shaped as a `ValueListenable`
 /// — synchronous notifications, no stream-microtask delays in widget
@@ -14,6 +13,9 @@
 
 library;
 
+import 'dart:async';
+
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 
 abstract class ConnectivityWatcher {
@@ -55,6 +57,50 @@ class InMemoryConnectivityWatcher implements ConnectivityWatcher {
 
   @override
   Future<void> dispose() async {
+    _notifier.dispose();
+  }
+}
+
+/// Production wiring — drives the same `ValueListenable<bool>` contract from
+/// the device's actual `connectivity_plus` stream. The watcher starts
+/// optimistic-online (matching the stub) so the offline banner only appears
+/// once the platform confirms a disconnection; flipping ahead of the first
+/// callback would briefly paint "offline" on every cold start.
+///
+/// **Not** used in widget tests. `flutter test` wires [InMemoryConnectivityWatcher]
+/// via constructor injection from `main.dart`'s `connectivity` field so this
+/// class is never instantiated in the test binding.
+class ConnectivityPlusWatcher implements ConnectivityWatcher {
+  ConnectivityPlusWatcher({Connectivity? connectivity})
+      : _connectivity = connectivity ?? Connectivity(),
+        _notifier = ValueNotifier<bool>(true) {
+    _subscription = _connectivity.onConnectivityChanged
+        .listen(_apply, onError: (_) => _notifier.value = false);
+    // Seed with the current state — `onConnectivityChanged` fires on
+    // transitions only, so without this the banner ignores a device that
+    // booted offline.
+    unawaited(_connectivity.checkConnectivity().then(_apply));
+  }
+
+  final Connectivity _connectivity;
+  final ValueNotifier<bool> _notifier;
+  StreamSubscription<List<ConnectivityResult>>? _subscription;
+
+  void _apply(List<ConnectivityResult> results) {
+    final online = results.any((r) => r != ConnectivityResult.none);
+    if (_notifier.value != online) _notifier.value = online;
+  }
+
+  @override
+  bool get isOnline => _notifier.value;
+
+  @override
+  ValueListenable<bool> get listenable => _notifier;
+
+  @override
+  Future<void> dispose() async {
+    await _subscription?.cancel();
+    _subscription = null;
     _notifier.dispose();
   }
 }
