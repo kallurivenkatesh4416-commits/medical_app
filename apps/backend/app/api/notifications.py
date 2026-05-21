@@ -10,26 +10,35 @@ Two endpoints:
     same event is a no-op (no second audit row).
 
 - ``POST /api/v1/notifications/fcm/ack``
-    Resident-side FCM delivery ack. Mobile push handler POSTs the
-    `provider_ref` the device received in the FCM data payload; the
-    backend marks the corresponding attempt as delivered. Owner-only —
-    a resident cannot ack another user's attempt (404, no existence
-    leak; same pattern as the resident-owned case-status read from
-    Slice 6 review).
+    Receiving-device FCM delivery ack. Mobile push handler POSTs the
+    ``attempt_id`` it read out of the FCM ``data`` payload (Slice 16
+    review #1 — the device cannot echo a ``provider_ref`` because FCM
+    only returns it after the send completes; the attempt id is the
+    pre-existing notification_attempts.id known at send time).
+
+    Open to any authenticated user — the owner check
+    (``attempt.recipient_id == actor.id``) is the actual security
+    boundary, since Slice 6's fan-out targets the on-call doctor /
+    nurse / ops / family for the FCM channel, not the resident.
+    Non-owner / unknown id returns 404 with no existence leak (same
+    pattern as the resident-owned case-status read from Slice 6
+    review).
 
 PHI: neither endpoint touches symptoms, vitals, notes, or records.
 The only data they update is `notification_attempts.status` + an
 optional bounded error string. Slice 6 PHI invariants hold.
 """
 
+import uuid
+
 from fastapi import APIRouter, Depends, Header, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlmodel import Session
 
 from app.config import get_settings
-from app.enums import NotificationChannel, NotificationStatus, Role
+from app.enums import NotificationChannel, NotificationStatus
 from app.models.user import User
-from app.security.deps import client_ip, get_db, require_roles
+from app.security.deps import client_ip, get_current_user, get_db
 from app.services import emergency_service
 from app.services.auth_service import AuthError
 from app.services.twilio_webhook import (
@@ -39,15 +48,12 @@ from app.services.twilio_webhook import (
 
 router = APIRouter(prefix="/api/v1/notifications", tags=["notifications"])
 
-resident_only = require_roles(Role.RESIDENT)
-
 
 class FcmAckIn(BaseModel):
-    # The full FCM v1 `name` field (`projects/<id>/messages/<msg>`) the
-    # device received. The backend matches on it directly to find the
-    # originating attempt. Bounded so an attacker cannot send a multi-MB
-    # payload — FCM names are well under 200 chars in practice.
-    provider_ref: str = Field(min_length=8, max_length=512)
+    # The pre-existing notification_attempts.id (UUID) the device read
+    # from the FCM data payload. Slice 16 review #1: this replaces the
+    # original `provider_ref` field — see module docstring.
+    attempt_id: uuid.UUID
 
 
 class FcmAckOut(BaseModel):
@@ -129,17 +135,22 @@ async def twilio_status_callback(
 def acknowledge_fcm_delivery(
     body: FcmAckIn,
     request: Request,
-    user: User = Depends(resident_only),
+    user: User = Depends(get_current_user),
     session: Session = Depends(get_db),
 ) -> FcmAckOut:
     """Mobile-side acknowledgment that an FCM push reached the device.
-    Resident-auth gated and owner-only so a resident cannot ack another
-    user's attempt. Idempotent — a second ack from the same device is a
-    no-op (no duplicate audit row)."""
+    Slice 16 review #1 — open to any authenticated user (the on-call
+    doctor / nurse / ops / family / security_desk are all valid
+    recipients per Slice 6 fan-out; the resident is NOT a push
+    recipient in the current flow). The owner check inside the service
+    is the security boundary: ``attempt.recipient_id == user.id`` or
+    the call returns 404 with no existence leak. Idempotent — a second
+    ack from the same device is a no-op (no duplicate audit row).
+    """
     attempt = emergency_service.acknowledge_fcm_delivery(
         session,
         user=user,
-        provider_ref=body.provider_ref,
+        attempt_id=body.attempt_id,
         from_ip=client_ip(request),
     )
     return FcmAckOut(status=attempt.status, case_id=str(attempt.case_id))

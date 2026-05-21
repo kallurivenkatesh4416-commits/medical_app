@@ -123,31 +123,44 @@ class FcmPushGateway:
             raise FcmConfigError("FCM credentials returned an empty access token")
         return token
 
-    def send_push(self, *, token: str, title: str, body: str) -> str:
+    def send_push(
+        self, *, token: str, title: str, body: str, attempt_id: str
+    ) -> str:
         """POSTs one FCM HTTP v1 message. Returns the ``name`` field —
         which uniquely identifies the message — so the caller can store
-        it as ``provider_ref`` and the mobile-device ack endpoint can
-        match the delivery back to the originating attempt.
+        it as ``provider_ref`` for FCM-console cross-reference.
 
-        PHI-safe: never logs `body` or `token`; Slice 6 stub gateway
-        masks the recipient the same way.
+        Slice 16 review #1: the receiving device acks delivery by
+        POSTing the ``attempt_id`` (our own ``notification_attempts.id``)
+        back to ``/api/v1/notifications/fcm/ack``. ``attempt_id`` is
+        threaded through the FCM ``data`` payload so the device push
+        handler can echo the right id. We cannot use ``provider_ref``
+        for this round-trip because FCM only returns it AFTER the send
+        call completes — by then it is too late to put in the payload.
+
+        PHI-safe: never logs `body` or `token`; ``attempt_id`` is a UUID
+        with no patient data. Slice 6 stub gateway masks the recipient
+        the same way.
         """
         payload = {
             "message": {
                 "token": token,
                 "notification": {"title": title, "body": body},
-                # Slice 14 mobile receives the FCM ack on the data channel;
-                # `provider_ref` lets the device POST back which attempt
-                # was delivered. The mobile push handler reads this from
-                # the data section (Android+iOS both surface it).
-                "data": {"provider_ref_marker": "v1"},
+                # Slice 16 review #1: the mobile push handler reads
+                # `data.attempt_id` and POSTs it back as the delivery
+                # ack. The marker stays so the receiving app can detect
+                # the v1 envelope vs. any future schema change.
+                "data": {
+                    "attempt_id": attempt_id,
+                    "provider_ref_marker": "v1",
+                },
                 # Best-effort high priority for emergency alerts. Quietly
                 # ignored on iOS; on Android it improves doze-mode delivery.
                 "android": {"priority": "high"},
                 "apns": {"headers": {"apns-priority": "10"}},
             }
         }
-        _log.info("fcm_push", project_id=self._project_id)
+        _log.info("fcm_push", project_id=self._project_id, attempt_id=attempt_id)
         resp = self._session.post(
             self._messages_url(),
             headers={

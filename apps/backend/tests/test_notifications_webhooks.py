@@ -394,29 +394,38 @@ def test_twilio_keys_not_configured_returns_200_matched_false(
 # --------------------------------------------------------------------------- #
 # FCM device-ack endpoint                                                     #
 # --------------------------------------------------------------------------- #
+#
+# Slice 16 review #1: the FCM ack endpoint corresponds to the on-call
+# doctor / nurse / ops / family receiving the push (Slice 6 §7
+# fan-out). The resident is NOT a push recipient in the current flow,
+# so these tests target a **doctor**-recipient attempt. The ack body
+# carries `attempt_id` — the device reads it out of the FCM `data`
+# payload at delivery time (see test_fcm.py for the data-shape proof).
 
 
-def test_fcm_ack_marks_attempt_delivered_for_owner(
+def test_fcm_ack_marks_doctor_attempt_delivered(
     client: TestClient, session: Session, project: Project, make_user, login
 ):
-    """The resident-side FCM ack is owner-only. Marks the attempt
-    delivered and writes the EMERGENCY_NOTIFICATION_ACK_RECEIVED audit row."""
-    resident, resident_user = _resident_with_user(session, project, make_user)
+    """Doctor receives the emergency push; their device POSTs the
+    attempt_id back. Status transitions to delivered + one audit row
+    captures the from/to transition + provider_ref."""
+    resident, _ = _resident_with_user(session, project, make_user)
+    doctor = make_user(Role.DOCTOR)
     attempt = _make_attempt(
         session,
         project=project,
         resident=resident,
-        recipient=resident_user,
+        recipient=doctor,
         channel=NotificationChannel.FCM,
         provider_ref="projects/demo/messages/abc",
     )
 
     headers = {
-        "Authorization": f"Bearer {login(resident_user.phone)['access_token']}",
+        "Authorization": f"Bearer {login(doctor.phone)['access_token']}",
     }
     resp = client.post(
         "/api/v1/notifications/fcm/ack",
-        json={"provider_ref": "projects/demo/messages/abc"},
+        json={"attempt_id": str(attempt.id)},
         headers=headers,
     )
     assert resp.status_code == 200, resp.text
@@ -433,40 +442,37 @@ def test_fcm_ack_marks_attempt_delivered_for_owner(
         )
     ).all()
     assert len(audits) == 1
-    assert audits[0].actor_user_id == resident_user.id
+    assert audits[0].actor_user_id == doctor.id
+    # Audit row carries the FCM `name` (provider_ref) for cross-reference
+    # with the FCM console — `attempt_id` is the resource_id field.
+    assert audits[0].resource_id == str(attempt.id)
     assert audits[0].meta["provider_ref"] == "projects/demo/messages/abc"
 
 
-def test_fcm_ack_from_non_owner_returns_404_no_existence_leak(
+def test_resident_cannot_ack_doctor_attempt(
     client: TestClient, session: Session, project: Project, make_user, login
 ):
+    """The endpoint is open to any authenticated user, but the owner
+    check (`attempt.recipient_id == actor.id`) is the security
+    boundary: a resident posting an ack for a doctor's FCM attempt
+    gets 404 with no existence leak."""
     resident, resident_user = _resident_with_user(session, project, make_user)
+    doctor = make_user(Role.DOCTOR)
     attempt = _make_attempt(
         session,
         project=project,
         resident=resident,
-        recipient=resident_user,
+        recipient=doctor,
         channel=NotificationChannel.FCM,
         provider_ref="projects/demo/messages/xyz",
     )
 
-    other_resident_user = make_user(Role.RESIDENT)
-    other_resident = Resident(
-        user_id=other_resident_user.id,
-        project_id=project.id,
-        flat_villa_number="A-9",
-        dob=date(1960, 1, 1),
-        gender="prefer_not_to_say",
-    )
-    session.add(other_resident)
-    session.commit()
-
     headers = {
-        "Authorization": f"Bearer {login(other_resident_user.phone)['access_token']}",
+        "Authorization": f"Bearer {login(resident_user.phone)['access_token']}",
     }
     resp = client.post(
         "/api/v1/notifications/fcm/ack",
-        json={"provider_ref": "projects/demo/messages/xyz"},
+        json={"attempt_id": str(attempt.id)},
         headers=headers,
     )
     assert resp.status_code == 404
@@ -474,30 +480,63 @@ def test_fcm_ack_from_non_owner_returns_404_no_existence_leak(
 
     session.refresh(attempt)
     assert attempt.status == NotificationStatus.SENT.value, (
-        "non-owner ack must not mutate the row"
+        "non-recipient ack must not mutate the row"
     )
+
+
+def test_fcm_ack_from_unrelated_doctor_returns_404(
+    client: TestClient, session: Session, project: Project, make_user, login
+):
+    """Even a doctor who is the *wrong* doctor (not the original FCM
+    recipient) gets 404 — role alone is not enough; the recipient match
+    on the attempt is what authorises the ack."""
+    resident, _ = _resident_with_user(session, project, make_user)
+    target_doctor = make_user(Role.DOCTOR)
+    other_doctor = make_user(Role.DOCTOR)
+    attempt = _make_attempt(
+        session,
+        project=project,
+        resident=resident,
+        recipient=target_doctor,
+        channel=NotificationChannel.FCM,
+        provider_ref="projects/demo/messages/other",
+    )
+
+    headers = {
+        "Authorization": f"Bearer {login(other_doctor.phone)['access_token']}",
+    }
+    resp = client.post(
+        "/api/v1/notifications/fcm/ack",
+        json={"attempt_id": str(attempt.id)},
+        headers=headers,
+    )
+    assert resp.status_code == 404
+
+    session.refresh(attempt)
+    assert attempt.status == NotificationStatus.SENT.value
 
 
 def test_fcm_ack_is_idempotent(
     client: TestClient, session: Session, project: Project, make_user, login
 ):
-    resident, resident_user = _resident_with_user(session, project, make_user)
+    resident, _ = _resident_with_user(session, project, make_user)
+    doctor = make_user(Role.DOCTOR)
     attempt = _make_attempt(
         session,
         project=project,
         resident=resident,
-        recipient=resident_user,
+        recipient=doctor,
         channel=NotificationChannel.FCM,
         provider_ref="projects/demo/messages/idem",
     )
 
     headers = {
-        "Authorization": f"Bearer {login(resident_user.phone)['access_token']}",
+        "Authorization": f"Bearer {login(doctor.phone)['access_token']}",
     }
     for _ in range(3):
         resp = client.post(
             "/api/v1/notifications/fcm/ack",
-            json={"provider_ref": "projects/demo/messages/idem"},
+            json={"attempt_id": str(attempt.id)},
             headers=headers,
         )
         assert resp.status_code == 200
@@ -513,19 +552,52 @@ def test_fcm_ack_is_idempotent(
     assert len(audits) == 1, "idempotent ack must not duplicate audit"
 
 
-def test_fcm_ack_for_unknown_provider_ref_returns_404(
+def test_fcm_ack_for_unknown_attempt_id_returns_404(
     client: TestClient, session: Session, project: Project, make_user, login
 ):
     _, resident_user = _resident_with_user(session, project, make_user)
     headers = {
         "Authorization": f"Bearer {login(resident_user.phone)['access_token']}",
     }
+    # A well-formed UUID that no notification_attempts row has.
     resp = client.post(
         "/api/v1/notifications/fcm/ack",
-        json={"provider_ref": "projects/demo/messages/ghost"},
+        json={"attempt_id": "00000000-0000-4000-8000-000000000000"},
         headers=headers,
     )
     assert resp.status_code == 404
+
+
+def test_fcm_ack_ignores_attempts_on_other_channels(
+    client: TestClient, session: Session, project: Project, make_user, login
+):
+    """SMS / voice attempts share the same `notification_attempts`
+    table but have their own delivery callback (Twilio status). The
+    FCM ack endpoint must NOT update an SMS/voice row even if the
+    actor is the recipient — channel-mismatched lookups return 404."""
+    resident, _ = _resident_with_user(session, project, make_user)
+    doctor = make_user(Role.DOCTOR)
+    sms_attempt = _make_attempt(
+        session,
+        project=project,
+        resident=resident,
+        recipient=doctor,
+        channel=NotificationChannel.SMS,
+        provider_ref="SMabc",
+    )
+
+    headers = {
+        "Authorization": f"Bearer {login(doctor.phone)['access_token']}",
+    }
+    resp = client.post(
+        "/api/v1/notifications/fcm/ack",
+        json={"attempt_id": str(sms_attempt.id)},
+        headers=headers,
+    )
+    assert resp.status_code == 404
+
+    session.refresh(sms_attempt)
+    assert sms_attempt.status == NotificationStatus.SENT.value
 
 
 def test_resident_can_register_own_device_token(

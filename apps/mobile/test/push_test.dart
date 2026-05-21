@@ -79,21 +79,27 @@ void main() {
   });
 
   group('DeviceTokenRepository.acknowledgePush', () {
+    // Slice 16 review #1: the device echoes back the `attempt_id` it
+    // read out of the FCM `data` payload — NOT a `provider_ref`. The
+    // backend ack endpoint looks the attempt up by id and owner-checks
+    // against the actor; see test_notifications_webhooks.py for the
+    // server-side coverage.
     test('200 from /notifications/fcm/ack -> true', () async {
       String? captured;
       final repo = DeviceTokenRepository(
         registerTokenCall: (_, __) async => _fail(500),
-        acknowledgeCall: (providerRef) async {
-          captured = providerRef;
+        acknowledgeCall: (attemptId) async {
+          captured = attemptId;
           return _ok({'status': 'delivered', 'case_id': 'c-1'});
         },
       );
-      final ok = await repo.acknowledgePush('projects/demo/messages/abc');
+      final ok =
+          await repo.acknowledgePush('00000000-0000-4000-8000-000000000abc');
       expect(ok, isTrue);
-      expect(captured, 'projects/demo/messages/abc');
+      expect(captured, '00000000-0000-4000-8000-000000000abc');
     });
 
-    test('empty provider_ref is a hard no-op', () async {
+    test('empty attempt_id is a hard no-op', () async {
       var called = false;
       final repo = DeviceTokenRepository(
         registerTokenCall: (_, __) async => _fail(500),
@@ -107,12 +113,13 @@ void main() {
       expect(called, isFalse);
     });
 
-    test('404 surfaces as false (owner mismatch or unknown ref)', () async {
+    test('404 surfaces as false (recipient mismatch or unknown id)', () async {
       final repo = DeviceTokenRepository(
         registerTokenCall: (_, __) async => _fail(500),
         acknowledgeCall: (_) async => _fail(404, 'notification_attempt_not_found'),
       );
-      final ok = await repo.acknowledgePush('projects/demo/messages/ghost');
+      final ok =
+          await repo.acknowledgePush('00000000-0000-4000-8000-00000000ghos');
       expect(ok, isFalse);
     });
   });

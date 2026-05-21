@@ -914,8 +914,16 @@ def _deliver_one(
             token = _push_token_for(session, user)
             if token is None:
                 raise _ChannelSkip("no_push_token")
+            # Slice 16 review #1: the attempt id rides in the FCM data
+            # payload so the receiving device can echo it back to
+            # /api/v1/notifications/fcm/ack. The FCM `name` returned
+            # here is still stored as provider_ref for cross-reference
+            # with FCM console logs.
             attempt.provider_ref = gateway.send_push(
-                token=token.push_token, title=_ALERT_TITLE, body=_ALERT_BODY
+                token=token.push_token,
+                title=_ALERT_TITLE,
+                body=_ALERT_BODY,
+                attempt_id=str(attempt.id),
             )
         elif attempt.channel == NotificationChannel.SMS.value:
             phone = _contact_phone_for(session, user, project_id=case.project_id)
@@ -1344,18 +1352,28 @@ def acknowledge_fcm_delivery(
     session: Session,
     *,
     user: User,
-    provider_ref: str,
+    attempt_id: uuid.UUID,
     from_ip: str | None,
 ) -> NotificationAttempt:
-    """Slice 16 — mobile device confirms an FCM push arrived. Owner-only:
-    the resident POSTing the ack must be the originally-targeted
-    recipient (`notification_attempts.recipient_id`). A non-owner gets
-    404 with no existence leak, matching the Slice 3/4/6 tenant-isolation
-    pattern."""
-    attempt = _find_attempt_by_provider_ref(
-        session, provider_ref=provider_ref, channel=NotificationChannel.FCM.value
-    )
-    if attempt is None or attempt.recipient_id != user.id:
+    """Slice 16 — mobile device confirms an FCM push arrived. The
+    receiving device echoes back the ``attempt_id`` it read out of the
+    FCM ``data`` payload (Slice 16 review #1: this replaces the original
+    ``provider_ref`` round-trip, which was unreachable because FCM only
+    returns the provider ref AFTER the send call completes).
+
+    Owner-only: the actor MUST equal ``notification_attempts.recipient_id``.
+    Because Slice 6's fan-out targets the on-call doctor / nurse / ops /
+    family for FCM, the ack endpoint accepts any authenticated user and
+    relies on the recipient match as the actual security boundary —
+    NOT a role gate. A non-owner gets 404 with no existence leak,
+    matching the Slice 3/4/6 tenant-isolation pattern.
+    """
+    attempt = session.get(NotificationAttempt, attempt_id)
+    if (
+        attempt is None
+        or attempt.channel != NotificationChannel.FCM.value
+        or attempt.recipient_id != user.id
+    ):
         raise AuthError(404, "notification_attempt_not_found", "Unknown notification.")
     # Idempotent: a second ack from the same device is a no-op.
     if attempt.status == NotificationStatus.DELIVERED.value:
@@ -1377,7 +1395,9 @@ def acknowledge_fcm_delivery(
         meta={
             "from_status": previous,
             "to_status": NotificationStatus.DELIVERED.value,
-            "provider_ref": provider_ref,
+            # `provider_ref` is the FCM `name` — kept in the audit row
+            # so ops can cross-reference with the FCM console.
+            "provider_ref": attempt.provider_ref,
         },
         commit=False,
     )

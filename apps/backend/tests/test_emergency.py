@@ -286,7 +286,9 @@ def test_one_channel_exception_does_not_block_the_others(
     _register_doctor_push(client, _auth(client, login, doctor))
 
     class FlakyGateway:
-        def send_push(self, *, token: str, title: str, body: str) -> str:
+        def send_push(
+            self, *, token: str, title: str, body: str, attempt_id: str
+        ) -> str:
             raise RuntimeError("fcm down")
 
         def send_sms(self, *, to: str, body: str) -> str:
@@ -326,7 +328,9 @@ def test_case_and_queued_attempts_commit_before_any_send(
     events: list[str] = []
 
     class Gateway:
-        def send_push(self, *, token: str, title: str, body: str) -> str:
+        def send_push(
+            self, *, token: str, title: str, body: str, attempt_id: str
+        ) -> str:
             events.append("push")
             return "ordered-push"
 
@@ -739,7 +743,9 @@ def test_delivery_claim_prevents_concurrent_double_send(
     sends: list[int] = []
 
     class Reentrant:
-        def send_push(self, *, token: str, title: str, body: str) -> str:
+        def send_push(
+            self, *, token: str, title: str, body: str, attempt_id: str
+        ) -> str:
             sends.append(1)
             # Simulate a concurrent deliverer arriving mid-send.
             emergency_service._deliver_pending(session, case=case)

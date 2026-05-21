@@ -139,7 +139,12 @@ def test_send_push_posts_to_v1_url_with_bearer_token(
     )
     gw = FcmPushGateway(session=session)  # type: ignore[arg-type]
 
-    name = gw.send_push(token="dev-token-1", title="Emergency alert", body="open app")
+    name = gw.send_push(
+        token="dev-token-1",
+        title="Emergency alert",
+        body="open app",
+        attempt_id="attempt-uuid-1",
+    )
 
     assert name == "projects/demo-1/messages/abc"
     assert len(session.calls) == 1
@@ -148,9 +153,10 @@ def test_send_push_posts_to_v1_url_with_bearer_token(
     assert call["headers"]["Authorization"] == "Bearer bearer-A"
     assert call["headers"]["Content-Type"] == "application/json"
     # JSON body shape — the device token is in `message.token`, the
-    # notification title/body is forwarded verbatim. The `data` map
-    # carries the v1 marker the mobile ack handler reads to know the
-    # provider_ref shape.
+    # notification title/body is forwarded verbatim. Slice 16 review #1:
+    # the `data` map carries the `attempt_id` the device echoes back to
+    # /api/v1/notifications/fcm/ack — `provider_ref_marker` stays so the
+    # device can detect the v1 envelope vs. a future schema change.
     import json as _json
 
     body = _json.loads(call["data"])
@@ -158,6 +164,8 @@ def test_send_push_posts_to_v1_url_with_bearer_token(
     assert body["message"]["notification"]["title"] == "Emergency alert"
     assert body["message"]["notification"]["body"] == "open app"
     assert body["message"]["android"]["priority"] == "high"
+    assert body["message"]["data"]["attempt_id"] == "attempt-uuid-1"
+    assert body["message"]["data"]["provider_ref_marker"] == "v1"
 
 
 def test_401_triggers_one_refresh_and_retries(
@@ -182,7 +190,9 @@ def test_401_triggers_one_refresh_and_retries(
     )
     gw = FcmPushGateway(session=session)  # type: ignore[arg-type]
 
-    name = gw.send_push(token="dev-token-2", title="t", body="b")
+    name = gw.send_push(
+        token="dev-token-2", title="t", body="b", attempt_id="a2"
+    )
 
     assert name == "projects/demo-2/messages/xyz"
     assert creds.refresh_calls == 1, "401 must force exactly one refresh"
@@ -203,7 +213,7 @@ def test_missing_project_id_raises_fcm_config_error(
 
     gw = FcmPushGateway(session=_FakeSession(responses=[]))  # type: ignore[arg-type]
     with pytest.raises(FcmConfigError, match="FCM_PROJECT_ID"):
-        gw.send_push(token="t", title="x", body="y")
+        gw.send_push(token="t", title="x", body="y", attempt_id="a")
 
 
 def test_missing_service_account_file_raises_fcm_config_error(
@@ -214,7 +224,7 @@ def test_missing_service_account_file_raises_fcm_config_error(
     )
     gw = FcmPushGateway(session=_FakeSession(responses=[]))  # type: ignore[arg-type]
     with pytest.raises(FcmConfigError, match="FCM_SERVICE_ACCOUNT_FILE"):
-        gw.send_push(token="t", title="x", body="y")
+        gw.send_push(token="t", title="x", body="y", attempt_id="a")
 
 
 def test_missing_file_on_disk_raises_fcm_config_error(
@@ -229,7 +239,7 @@ def test_missing_file_on_disk_raises_fcm_config_error(
     )
     gw = FcmPushGateway(session=_FakeSession(responses=[]))  # type: ignore[arg-type]
     with pytest.raises(FcmConfigError, match="not found"):
-        gw.send_push(token="t", title="x", body="y")
+        gw.send_push(token="t", title="x", body="y", attempt_id="a")
 
 
 def test_fcm_response_without_name_raises(
@@ -248,4 +258,4 @@ def test_fcm_response_without_name_raises(
     session = _FakeSession(responses=[_FakeResp(json_body={"unexpected": True})])
     gw = FcmPushGateway(session=session)  # type: ignore[arg-type]
     with pytest.raises(FcmConfigError, match="no `name`"):
-        gw.send_push(token="t", title="x", body="y")
+        gw.send_push(token="t", title="x", body="y", attempt_id="a")

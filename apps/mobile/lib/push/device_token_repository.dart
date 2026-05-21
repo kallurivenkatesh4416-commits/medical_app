@@ -30,7 +30,7 @@ typedef RegisterDeviceTokenCall = Future<ApiResponse> Function(
   String platform,
 );
 
-typedef AcknowledgeFcmCall = Future<ApiResponse> Function(String providerRef);
+typedef AcknowledgeFcmCall = Future<ApiResponse> Function(String attemptId);
 
 class DeviceTokenRepository {
   DeviceTokenRepository({
@@ -51,15 +51,18 @@ class DeviceTokenRepository {
     return resp.ok;
   }
 
-  /// Called by the mobile push handler when an FCM message arrives. The
-  /// provider_ref comes from the FCM data payload the backend sets at
-  /// send time (`projects/<id>/messages/<msg>`). Returns true on a 2xx;
-  /// caller logs but does not retry on failure — the backend already
-  /// considers the SMS+voice channels as fallbacks and the resident
-  /// can still re-call /me/notifications/fcm/ack on the next push.
-  Future<bool> acknowledgePush(String providerRef) async {
-    if (providerRef.isEmpty) return false;
-    final resp = await acknowledgeCall(providerRef);
+  /// Called by the mobile push handler when an FCM message arrives.
+  /// Slice 16 review #1: the device reads `attempt_id` (a UUID string)
+  /// out of the FCM `data` payload — NOT `provider_ref`. FCM only
+  /// returns its own `name` after the backend's send call completes,
+  /// so the device cannot echo it back; the backend threads the
+  /// pre-existing `notification_attempts.id` through the data payload
+  /// instead. Returns true on a 2xx; caller logs but does not retry
+  /// on failure — the SMS + voice channels are still the Slice 6
+  /// fan-out's safety net.
+  Future<bool> acknowledgePush(String attemptId) async {
+    if (attemptId.isEmpty) return false;
+    final resp = await acknowledgeCall(attemptId);
     return resp.ok;
   }
 }
@@ -70,9 +73,9 @@ DeviceTokenRepository buildDeviceTokenRepository(ApiClient client) {
       '/api/v1/me/device-tokens',
       body: {'token': token, 'platform': platform},
     ),
-    acknowledgeCall: (providerRef) => client.postJson(
+    acknowledgeCall: (attemptId) => client.postJson(
       '/api/v1/notifications/fcm/ack',
-      body: {'provider_ref': providerRef},
+      body: {'attempt_id': attemptId},
     ),
   );
 }

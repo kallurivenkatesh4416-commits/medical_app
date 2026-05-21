@@ -122,13 +122,16 @@ push channel that brings the doctor a real notification.
 
 ## Test cadence (Slice 16 baseline)
 
-`ruff` clean. `pytest`: **175 passed** (was 155 pre-Slice-16; **+20**).
+`ruff` clean. `pytest`: **177 passed** (was 155 pre-Slice-16; **+22**:
+Slice 16 added 6 FCM + 14 webhook/ack/device-token tests, and review
+#1 added 2 new owner-check tests for the doctor-recipient + cross-
+channel cases).
 New tests:
 
 | Suite | Coverage |
 |---|---|
 | `tests/test_fcm.py` (6 tests) | Bearer + URL + payload contract, 401 → refresh + retry, missing project id / missing file / file-not-found / missing `name` field all raise `FcmConfigError` |
-| `tests/test_notifications_webhooks.py` (14 tests) | Twilio SMS delivered, voice failed-with-error, invalid signature 403, intermediate state no-op, unknown sid 200/matched:false, replay idempotency, keys-not-configured accept-and-drop. FCM ack owner-only + idempotent + unknown-ref 404 + non-owner 404. Resident `/me/device-tokens` audit + idempotent upsert. Staff `/devices/push-token` still rejects residents. |
+| `tests/test_notifications_webhooks.py` (16 tests) | Twilio SMS delivered, voice failed-with-error, invalid signature 403, intermediate state no-op, unknown sid 200/matched:false, replay idempotency, keys-not-configured accept-and-drop. FCM ack against the **doctor recipient** (Slice 16 review #1) + idempotent + unknown-id 404 + resident-cannot-ack-doctor-attempt 404 + unrelated-doctor 404 + cross-channel-id 404. Resident `/me/device-tokens` audit + idempotent upsert. Staff `/devices/push-token` still rejects residents. |
 
 Mobile: `flutter analyze` clean. `flutter test`: **73 passed** (was 64;
 **+9** new push tests). `push_test.dart` covers:
@@ -152,6 +155,48 @@ Existing baseline holds:
 - Shared-types typecheck clean.
 - Mobile pre-Slice-16: 64 (Slice 14 baseline). All Slice 1–14 widget
   tests still pass.
+
+## Slice 16 review #1 fixes
+
+- **FCM ack path corrected for the real Slice 6 fan-out.** The original
+  Slice 16 endpoint owner-checked the actor against
+  `notification_attempts.recipient_id` but the recipient is the
+  **on-call doctor** (per `_stage_planned_attempts` in
+  `emergency_service.py`), not the resident. The endpoint was also
+  `resident_only` and the FCM `data` payload carried only a static
+  `provider_ref_marker` — there was no field on the device side that
+  could be echoed back to identify the originating attempt. As shipped
+  in the original Slice 16, the "FCM delivered/ack loop" was not
+  reachable in the real doctor-alert path. The original ack tests
+  hid this by constructing resident-recipient FCM attempts.
+- **Fix.** `notification_attempts.id` (a pre-existing UUID known at
+  send time) is now threaded through the FCM `data` payload via the
+  `send_push(..., attempt_id=...)` signature. The device-side ack
+  posts that id back to `/api/v1/notifications/fcm/ack` (body now
+  `{"attempt_id": "<uuid>"}`, not `{"provider_ref": "..."}`). The
+  endpoint is open to any authenticated user — the owner check
+  (`attempt.recipient_id == actor.id`) is the actual security
+  boundary, because the resident is NOT a push recipient in Slice 6
+  fan-out. `notification_attempts.provider_ref` continues to hold the
+  FCM `name` for cross-reference with the FCM console; the audit row
+  carries it in `meta.provider_ref` and the attempt id in
+  `resource_id`.
+- **New owner-check tests prove the boundary.** Three additions to
+  `test_notifications_webhooks.py`:
+  `test_resident_cannot_ack_doctor_attempt`,
+  `test_fcm_ack_from_unrelated_doctor_returns_404`, and
+  `test_fcm_ack_ignores_attempts_on_other_channels` (an SMS / voice
+  attempt id posted to the FCM ack endpoint must 404 even if the
+  actor IS the recipient — channel-mismatched lookups stay opaque).
+  `test_fcm.py`'s happy-path now asserts both `attempt_id` and the
+  `provider_ref_marker` show up in the FCM `data` payload.
+- **No DB migration.** All changes are at the request/response shape
+  + service-layer level; `notification_attempts` columns are
+  unchanged. The Slice 16 commit's audit rows are still valid; only
+  the meta-field name changed (`provider_ref` is still recorded for
+  audit; the `resource_id` slot now carries `attempt_id`).
+- **Mobile** `DeviceTokenRepository.acknowledgePush(String attemptId)`
+  matches the new contract; `push_test.dart` was updated.
 
 ## Integration points the next slice should honour
 
@@ -223,7 +268,7 @@ endpoint via the dashboard remain unaffected.
 |---|---|
 | Backend `ruff` | All checks passed |
 | Backend `alembic check` | No model drift (Slice 16 adds no migrations) |
-| Backend `pytest` | **175 passed** (155 → +20) |
+| Backend `pytest` | **177 passed** (155 → +22 with review #1) |
 | `shared-types` typecheck | Clean |
 | Dashboard typecheck / lint / build | Unchanged from Slice 14 (no dashboard work this slice) |
 | `flutter analyze` | No issues |

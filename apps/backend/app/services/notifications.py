@@ -45,7 +45,18 @@ def _mask(recipient: str) -> str:
 class NotificationGateway(Protocol):
     def send_sms(self, *, to: str, body: str) -> str: ...
 
-    def send_push(self, *, token: str, title: str, body: str) -> str: ...
+    # Slice 16 review #1: `attempt_id` is the pre-existing
+    # ``notification_attempts.id`` (UUID) for this push. It rides in the
+    # FCM `data` payload so the receiving device can POST the same id
+    # back to ``/api/v1/notifications/fcm/ack`` for delivery
+    # confirmation. We CANNOT round-trip the FCM `name` (the provider
+    # ref) the same way because FCM only returns it after the send call
+    # completes — so the device-side ack matches on `attempt_id`, while
+    # `notification_attempts.provider_ref` stays as the FCM `name` for
+    # cross-referencing in the FCM console.
+    def send_push(
+        self, *, token: str, title: str, body: str, attempt_id: str
+    ) -> str: ...
 
     def place_voice_call(self, *, to: str, twiml_url: str) -> str: ...
 
@@ -68,8 +79,12 @@ class StubNotificationGateway:
         _log.info("stub_sms", to=_mask(to))
         return "stub-sms"
 
-    def send_push(self, *, token: str, title: str, body: str) -> str:
-        _log.info("stub_push")
+    def send_push(
+        self, *, token: str, title: str, body: str, attempt_id: str
+    ) -> str:
+        # `attempt_id` is logged so dev/CI can correlate stub pushes with
+        # notification_attempts rows; the value is a UUID, never PHI.
+        _log.info("stub_push", attempt_id=attempt_id)
         return "stub-push"
 
     def place_voice_call(self, *, to: str, twiml_url: str) -> str:
@@ -141,7 +156,9 @@ class TwilioNotificationGateway:
         _log.info("twilio_sms", to=_mask(to))
         return self._post_message(to=to, body=body, sender=self._sms_from, channel="sms")
 
-    def send_push(self, *, token: str, title: str, body: str) -> str:
+    def send_push(
+        self, *, token: str, title: str, body: str, attempt_id: str
+    ) -> str:
         # FCM is not a Twilio service. The composite gateway built by
         # `get_notification_gateway()` routes push to `FcmPushGateway`
         # instead of this method; this stays as a defensive fallback so a
@@ -149,6 +166,7 @@ class TwilioNotificationGateway:
         # gets a clear error rather than a silent no-op. Slice 6's fan-out
         # logs this as the FCM attempt's failure and continues with SMS /
         # voice — patient-safety invariant preserved.
+        del attempt_id  # logged via FcmConfigError below for visibility
         raise FcmConfigError(
             "TwilioNotificationGateway does not implement send_push. "
             "Use `get_notification_gateway()` to get the composite that "
@@ -208,8 +226,12 @@ class CompositeGateway:
         self._push = push
         self._messaging = messaging
 
-    def send_push(self, *, token: str, title: str, body: str) -> str:
-        return self._push.send_push(token=token, title=title, body=body)
+    def send_push(
+        self, *, token: str, title: str, body: str, attempt_id: str
+    ) -> str:
+        return self._push.send_push(
+            token=token, title=title, body=body, attempt_id=attempt_id
+        )
 
     def send_sms(self, *, to: str, body: str) -> str:
         return self._messaging.send_sms(to=to, body=body)
