@@ -13,11 +13,38 @@ from app.models.audit import AuditLog
 from app.models.auth import OtpCode, RefreshToken
 from app.models.base import utcnow
 from app.models.user import User
+from app.security.dashboard_session import (
+    DASHBOARD_ACCESS_COOKIE,
+    DASHBOARD_CSRF_HEADER,
+    DASHBOARD_REFRESH_COOKIE,
+    DASHBOARD_SESSION_COOKIE,
+)
 from app.services import auth_service
 
 
 def _bearer(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def _dashboard_login(client: TestClient, phone: str):
+    req = client.post("/api/v1/auth/otp/request", json={"phone": phone})
+    assert req.status_code == 200, req.text
+    resp = client.post(
+        "/api/v1/auth/otp/verify",
+        json={
+            "phone": phone,
+            "code": req.json()["dev_otp"],
+            "dashboard_session": True,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    return resp
+
+
+def _dashboard_csrf(client: TestClient) -> dict[str, str]:
+    resp = client.get("/api/v1/auth/csrf")
+    assert resp.status_code == 200, resp.text
+    return {DASHBOARD_CSRF_HEADER: resp.json()["csrf_token"]}
 
 
 @pytest.mark.parametrize(
@@ -52,6 +79,50 @@ def test_otp_login_happy_path(client: TestClient, make_user, login) -> None:
     body = me.json()
     assert body["phone"] == user.phone
     assert body["role"] == Role.DOCTOR.value
+
+
+def test_dashboard_login_issues_http_only_cookie_session(
+    client: TestClient, make_user
+) -> None:
+    user = make_user(Role.DOCTOR, phone="+15551110011")
+    resp = _dashboard_login(client, user.phone)
+
+    body = resp.json()
+    assert body["session_transport"] == "cookie"
+    assert body["access_token"] is None
+    assert body["refresh_token"] is None
+    assert client.cookies.get(DASHBOARD_ACCESS_COOKIE)
+    assert client.cookies.get(DASHBOARD_REFRESH_COOKIE)
+    assert client.cookies.get(DASHBOARD_SESSION_COOKIE)
+
+    set_cookie = ", ".join(resp.headers.get_list("set-cookie")).lower()
+    assert "httponly" in set_cookie
+    assert "samesite=strict" in set_cookie
+    assert "path=/api/v1" in set_cookie
+    assert "path=/api/v1/auth" in set_cookie
+
+    me = client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    assert me.json()["phone"] == user.phone
+
+
+def test_dashboard_cookie_writes_require_csrf(client: TestClient, make_user) -> None:
+    user = make_user(Role.DOCTOR, phone="+15551110012")
+    _dashboard_login(client, user.phone)
+
+    denied = client.post(
+        "/api/v1/devices/push-token",
+        json={"token": "token-123456", "platform": "web"},
+    )
+    assert denied.status_code == 403
+    assert denied.json()["error"]["code"] == "http_403"
+
+    allowed = client.post(
+        "/api/v1/devices/push-token",
+        json={"token": "token-123456", "platform": "web"},
+        headers=_dashboard_csrf(client),
+    )
+    assert allowed.status_code == 200
 
 
 def test_otp_request_does_not_leak_code_in_non_local(
@@ -214,6 +285,35 @@ def test_refresh_rotation_and_reuse_detection(
     assert after.status_code == 401
 
 
+def test_dashboard_cookie_refresh_rotates_and_reuse_revokes_family(
+    client: TestClient, make_user
+) -> None:
+    user = make_user(Role.DOCTOR, phone="+15551110013")
+    _dashboard_login(client, user.phone)
+    csrf = _dashboard_csrf(client)
+    first_refresh = client.cookies.get(DASHBOARD_REFRESH_COOKIE)
+    assert first_refresh
+
+    missing_csrf = client.post("/api/v1/auth/refresh")
+    assert missing_csrf.status_code == 403
+
+    rotated = client.post("/api/v1/auth/refresh", headers=csrf)
+    assert rotated.status_code == 200
+    assert rotated.json() == {"session_transport": "cookie"}
+    current_refresh = client.cookies.get(DASHBOARD_REFRESH_COOKIE)
+    assert current_refresh and current_refresh != first_refresh
+
+    reuse = client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": first_refresh},
+    )
+    assert reuse.status_code == 401
+    assert reuse.json()["error"]["code"] == "refresh_reuse_detected"
+
+    after = client.post("/api/v1/auth/refresh", headers=csrf)
+    assert after.status_code == 401
+
+
 def test_rotation_is_consistent_and_replay_kills_new_token(
     client: TestClient, make_user, login, session: Session
 ) -> None:
@@ -257,3 +357,50 @@ def test_logout_revokes_refresh(client: TestClient, make_user, login) -> None:
         "/api/v1/auth/refresh", json={"refresh_token": tokens["refresh_token"]}
     )
     assert resp.status_code == 401
+
+
+def test_dashboard_cookie_logout_revokes_refresh_and_clears_cookies(
+    client: TestClient, make_user
+) -> None:
+    user = make_user(Role.DOCTOR, phone="+15551110014")
+    _dashboard_login(client, user.phone)
+    csrf = _dashboard_csrf(client)
+    raw_refresh = client.cookies.get(DASHBOARD_REFRESH_COOKIE)
+    assert raw_refresh
+
+    denied = client.post("/api/v1/auth/logout")
+    assert denied.status_code == 403
+
+    out = client.post("/api/v1/auth/logout", headers=csrf)
+    assert out.status_code == 204
+    assert client.cookies.get(DASHBOARD_ACCESS_COOKIE) is None
+    assert client.cookies.get(DASHBOARD_REFRESH_COOKIE) is None
+    assert client.cookies.get(DASHBOARD_SESSION_COOKIE) is None
+    assert (
+        client.post("/api/v1/auth/refresh", json={"refresh_token": raw_refresh}).status_code
+        == 401
+    )
+
+
+def test_dashboard_cors_allows_only_configured_credentialed_origin(
+    client: TestClient,
+) -> None:
+    allowed = client.options(
+        "/api/v1/auth/me",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert allowed.status_code == 200
+    assert allowed.headers["access-control-allow-origin"] == "http://localhost:5173"
+    assert allowed.headers["access-control-allow-credentials"] == "true"
+
+    denied = client.options(
+        "/api/v1/auth/me",
+        headers={
+            "Origin": "https://evil.example",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert "access-control-allow-origin" not in denied.headers

@@ -19,8 +19,10 @@ describe("auth gate", () => {
   it("unauthenticated visit to /alerts redirects to /login with next=", async () => {
     renderApp({
       routes: [
-        // No /auth/me — bootstrap has no refresh token so the gate
-        // bounces straight to /login without ever calling /me.
+        {
+          match: "GET http://api.test/api/v1/auth/csrf",
+          respond: () => ({ status: 401, json: { error: { code: "expired" } } }),
+        },
       ],
       initialPath: "/alerts",
     });
@@ -33,11 +35,8 @@ describe("auth gate", () => {
     renderApp({
       routes: [
         {
-          match: "POST http://api.test/api/v1/auth/refresh",
-          respond: () => ({
-            status: 200,
-            json: { access_token: "a-new", refresh_token: "r-new" },
-          }),
+          match: "GET http://api.test/api/v1/auth/csrf",
+          respond: () => ({ status: 200, json: { csrf_token: "csrf-doctor" } }),
         },
         {
           match: "GET http://api.test/api/v1/auth/me",
@@ -58,7 +57,6 @@ describe("auth gate", () => {
         },
       ],
       initialPath: "/alerts",
-      preAuth: { access: "a-1", refresh: "r-1" },
     });
 
     expect(
@@ -73,11 +71,8 @@ describe("auth gate", () => {
     renderApp({
       routes: [
         {
-          match: "POST http://api.test/api/v1/auth/refresh",
-          respond: () => ({
-            status: 200,
-            json: { access_token: "a-new", refresh_token: "r-new" },
-          }),
+          match: "GET http://api.test/api/v1/auth/csrf",
+          respond: () => ({ status: 200, json: { csrf_token: "csrf-admin" } }),
         },
         {
           match: "GET http://api.test/api/v1/auth/me",
@@ -94,7 +89,6 @@ describe("auth gate", () => {
         },
       ],
       initialPath: "/alerts",
-      preAuth: { access: "a-1", refresh: "r-1" },
     });
 
     await waitFor(() =>

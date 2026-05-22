@@ -8,6 +8,15 @@ from sqlmodel import Session
 
 from app.config import get_settings
 from app.models.user import User
+from app.security.dashboard_session import (
+    clear_dashboard_session_cookies,
+    create_dashboard_csrf_token,
+    csrf_cookie_session_present,
+    dashboard_refresh_cookie,
+    dashboard_session_cookie,
+    set_dashboard_session_cookies,
+    verify_dashboard_csrf,
+)
 from app.security.deps import client_ip, get_current_user, get_db
 from app.security.jwt import create_registration_token
 from app.services import auth_service
@@ -24,6 +33,7 @@ class OtpRequestIn(BaseModel):
 class OtpVerifyIn(BaseModel):
     phone: str = _PHONE
     code: str = Field(min_length=4, max_length=10)
+    dashboard_session: bool = False
 
 
 class RefreshIn(BaseModel):
@@ -59,6 +69,15 @@ class OtpVerifyOut(BaseModel):
     refresh_token: str | None = None
     token_type: str = "bearer"
     registration_token: str | None = None
+    session_transport: str = "bearer"
+
+
+class CookieSessionOut(BaseModel):
+    session_transport: str = "cookie"
+
+
+class CsrfOut(BaseModel):
+    csrf_token: str
 
 
 @router.post("/otp/request", response_model=OtpRequestOut)
@@ -78,6 +97,7 @@ def otp_request(
 def otp_verify(
     body: OtpVerifyIn,
     request: Request,
+    response: Response,
     session: Session = Depends(get_db),
 ) -> OtpVerifyOut:
     ip = client_ip(request)
@@ -91,31 +111,76 @@ def otp_verify(
             registration_token=create_registration_token(phone=body.phone),
         )
     access, refresh = auth_service.login_user(session, user=user, from_ip=ip)
+    if body.dashboard_session:
+        set_dashboard_session_cookies(
+            response,
+            access_token=access,
+            refresh_token=refresh,
+        )
+        return OtpVerifyOut(session_transport="cookie")
     return OtpVerifyOut(access_token=access, refresh_token=refresh)
 
 
-@router.post("/refresh", response_model=TokenPair)
+@router.post("/refresh", response_model=TokenPair | CookieSessionOut)
 def refresh(
-    body: RefreshIn,
     request: Request,
+    response: Response,
+    body: RefreshIn | None = None,
     session: Session = Depends(get_db),
-) -> TokenPair:
+) -> TokenPair | CookieSessionOut:
+    cookie_refresh = dashboard_refresh_cookie(request)
+    cookie_flow = body is None and cookie_refresh is not None
+    raw_refresh = cookie_refresh if cookie_flow else body.refresh_token if body else None
+    if raw_refresh is None:
+        raise auth_service.AuthError(401, "invalid_refresh", "Invalid refresh token.")
+    if cookie_flow:
+        verify_dashboard_csrf(request)
     access, new_refresh = auth_service.rotate_refresh(
-        session, raw_refresh=body.refresh_token, from_ip=client_ip(request)
+        session, raw_refresh=raw_refresh, from_ip=client_ip(request)
     )
+    if cookie_flow:
+        set_dashboard_session_cookies(
+            response,
+            access_token=access,
+            refresh_token=new_refresh,
+            session_id=dashboard_session_cookie(request),
+        )
+        return CookieSessionOut()
     return TokenPair(access_token=access, refresh_token=new_refresh)
 
 
 @router.post("/logout", status_code=204)
 def logout(
-    body: RefreshIn,
     request: Request,
+    response: Response,
+    body: RefreshIn | None = None,
     session: Session = Depends(get_db),
 ) -> Response:
-    auth_service.logout(
-        session, raw_refresh=body.refresh_token, from_ip=client_ip(request)
-    )
-    return Response(status_code=204)
+    cookie_refresh = dashboard_refresh_cookie(request)
+    cookie_session = dashboard_session_cookie(request)
+    cookie_flow = body is None and (cookie_refresh is not None or cookie_session is not None)
+    raw_refresh = cookie_refresh if cookie_flow else body.refresh_token if body else None
+    if cookie_flow:
+        verify_dashboard_csrf(request)
+    if raw_refresh is not None:
+        auth_service.logout(session, raw_refresh=raw_refresh, from_ip=client_ip(request))
+    if cookie_flow or cookie_session:
+        clear_dashboard_session_cookies(response)
+    response.status_code = 204
+    return response
+
+
+@router.get("/csrf", response_model=CsrfOut)
+def csrf(request: Request) -> CsrfOut:
+    if not csrf_cookie_session_present(request):
+        raise auth_service.AuthError(
+            401,
+            "dashboard_session_required",
+            "Dashboard session is not available.",
+        )
+    session_id = dashboard_session_cookie(request)
+    assert session_id is not None
+    return CsrfOut(csrf_token=create_dashboard_csrf_token(session_id=session_id))
 
 
 @router.get("/me", response_model=UserOut)

@@ -24,11 +24,8 @@ const RESIDENT_ID = "22222222-2222-4222-8222-222222222222";
 function doctorRoutes(extra: Route[] = []): Route[] {
   return [
     {
-      match: "POST http://api.test/api/v1/auth/refresh",
-      respond: () => ({
-        status: 200,
-        json: { access_token: "a-new", refresh_token: "r-new" },
-      }),
+      match: "GET http://api.test/api/v1/auth/csrf",
+      respond: () => ({ status: 200, json: { csrf_token: "csrf-handover" } }),
     },
     {
       match: "GET http://api.test/api/v1/auth/me",
@@ -78,6 +75,7 @@ const baseAlert = {
 describe("alert-to-case-to-handover flow", () => {
   it("lists alerts, opens a case, and generates a handover", async () => {
     const handoverBodies: unknown[] = [];
+    const handoverRequests: RequestInit[] = [];
 
     renderApp({
       routes: doctorRoutes([
@@ -95,6 +93,9 @@ describe("alert-to-case-to-handover flow", () => {
         {
           match: `POST http://api.test/api/v1/emergency/alerts/${CASE_ID}/handover`,
           capture: (body) => handoverBodies.push(body),
+          captureRequest: (init) => {
+            if (init) handoverRequests.push(init);
+          },
           respond: () => ({
             status: 200,
             json: {
@@ -108,7 +109,6 @@ describe("alert-to-case-to-handover flow", () => {
         },
       ]),
       initialPath: "/alerts",
-      preAuth: { access: "a-1", refresh: "r-1" },
     });
 
     // (1) Alert feed.
@@ -137,5 +137,11 @@ describe("alert-to-case-to-handover flow", () => {
       hospital_destination: "Apollo Hospital",
       doctor_registration_number: "MCI-12345",
     });
+    expect(handoverRequests).toHaveLength(1);
+    const handoverRequest = handoverRequests[0]!;
+    expect(new Headers(handoverRequest.headers).get("X-CSRF-Token")).toBe(
+      "csrf-handover",
+    );
+    expect(handoverRequest.credentials).toBe("include");
   });
 });

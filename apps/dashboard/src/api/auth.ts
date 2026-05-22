@@ -44,6 +44,7 @@ export type OtpVerifyOut = {
   access_token: string | null;
   refresh_token: string | null;
   registration_token: string | null;
+  session_transport: "bearer" | "cookie";
 };
 
 export const authApi = {
@@ -52,15 +53,19 @@ export const authApi = {
   },
 
   async verifyOtp(client: ApiClient, phone: string, code: string): Promise<OtpVerifyOut> {
-    return client.post<OtpVerifyOut>("/api/v1/auth/otp/verify", { phone, code });
+    return client.post<OtpVerifyOut>("/api/v1/auth/otp/verify", {
+      phone,
+      code,
+      dashboard_session: true,
+    });
   },
 
   async me(client: ApiClient): Promise<User> {
     return client.get<User>("/api/v1/auth/me");
   },
 
-  async logout(client: ApiClient, refreshToken: string): Promise<void> {
+  async logout(client: ApiClient): Promise<void> {
     // The /auth/logout response is 204 — `request` returns null safely.
-    await client.post("/api/v1/auth/logout", { refresh_token: refreshToken });
+    await client.post("/api/v1/auth/logout");
   },
 };

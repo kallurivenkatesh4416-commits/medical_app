@@ -1,4 +1,5 @@
-# Backend image. WeasyPrint native deps are added in the PDF slice (Slice 8).
+# Backend image. The PDF stack pulls pycairo through svglib, so the slim base
+# needs Cairo headers and a compiler while Python dependencies are installed.
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -6,6 +7,13 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        build-essential \
+        libcairo2-dev \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml ./
 RUN pip install --upgrade pip && pip install -e ".[dev]"

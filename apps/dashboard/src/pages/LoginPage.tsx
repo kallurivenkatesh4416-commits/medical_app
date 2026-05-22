@@ -5,13 +5,12 @@
  *   1. Phone → POST /auth/otp/request. Backend returns `dev_otp` only
  *      when APP_ENV=local; we surface it as a hint so the local demo
  *      doesn't need a real SMS provider.
- *   2. Phone + code → POST /auth/otp/verify. On success we set tokens
- *      and route to the `?next=` query param (defaulting to /alerts).
+ *   2. Phone + code → POST /auth/otp/verify. On success the backend sets
+ *      dashboard cookies and we route to `?next=` (defaulting to /alerts).
  *
  * No bearer token paste UI — that was the old `App.tsx` shape and
  * the audit P1 #4 finding. No `localStorage` either; AuthContext
- * holds the access token in memory and stashes the refresh token in
- * `sessionStorage` per the Slice 15 scoping decision.
+ * never sees the access or refresh token after Slice 18b.
  */
 
 import { useState, type FormEvent } from "react";

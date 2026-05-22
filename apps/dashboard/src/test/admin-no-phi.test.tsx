@@ -31,11 +31,8 @@ describe("builder_admin dashboard is PHI-free", () => {
     renderApp({
       routes: [
         {
-          match: "POST http://api.test/api/v1/auth/refresh",
-          respond: () => ({
-            status: 200,
-            json: { access_token: "a-new", refresh_token: "r-new" },
-          }),
+          match: "GET http://api.test/api/v1/auth/csrf",
+          respond: () => ({ status: 200, json: { csrf_token: "csrf-admin" } }),
         },
         {
           match: "GET http://api.test/api/v1/auth/me",
@@ -84,7 +81,6 @@ describe("builder_admin dashboard is PHI-free", () => {
         },
       ],
       initialPath: "/admin/kpis",
-      preAuth: { access: "a-1", refresh: "r-1" },
     });
 
     await waitFor(() =>

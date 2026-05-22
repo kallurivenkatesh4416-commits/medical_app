@@ -37,12 +37,14 @@ void main() {
         find.widgetWithText(FilledButton, 'I understand — continue'),
       );
       expect(button.onPressed, isNull,
-          reason: 'continue must be disabled before the ack checkbox is tapped');
+          reason:
+              'continue must be disabled before the ack checkbox is tapped');
 
       await tester.tap(find.text('I have read and understood the above.'));
       await tester.pump();
 
-      await tester.tap(find.widgetWithText(FilledButton, 'I understand — continue'));
+      await tester
+          .tap(find.widgetWithText(FilledButton, 'I understand — continue'));
       await tester.pump();
 
       expect(acknowledged, isTrue);
@@ -83,10 +85,29 @@ void main() {
           return true;
         }),
       ));
-      await tester.tap(find.widgetWithText(FilledButton, callOneZeroEightLabel));
+      await tester
+          .tap(find.widgetWithText(FilledButton, callOneZeroEightLabel));
       await tester.pump();
       expect(launched?.scheme, 'tel');
       expect(launched?.path, '108');
+    });
+
+    testWidgets(
+        'login stays laid out when the keyboard takes most of the screen',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(360, 480));
+      addTearDown(() async => tester.binding.setSurfaceSize(null));
+      tester.view.viewInsets = const FakeViewPadding(bottom: 260);
+      addTearDown(tester.view.resetViewInsets);
+
+      await tester.pumpWidget(MaterialApp(
+        home: LoginScreen(launcher: (_) async => true),
+      ));
+      await tester.showKeyboard(find.byType(TextField).last);
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+      expect(find.widgetWithText(FilledButton, 'Call 108'), findsOneWidget);
     });
 
     testWidgets('Sign In tap from splash is the second tap of the ≤2-tap path',
@@ -136,7 +157,8 @@ void main() {
       expect(find.text(disclaimerShort), findsOneWidget);
     });
 
-    testWidgets('NOT present on the settings tab (not a health-insight surface)',
+    testWidgets(
+        'NOT present on the settings tab (not a health-insight surface)',
         (tester) async {
       await pumpHomeShell(tester);
       await tester.tap(find.text('Settings'));
@@ -249,8 +271,7 @@ void main() {
       expect(find.bySemanticsLabel('Sign In'), findsWidgets);
     });
 
-    testWidgets('login primary buttons carry Semantics labels',
-        (tester) async {
+    testWidgets('login primary buttons carry Semantics labels', (tester) async {
       await tester.pumpWidget(MaterialApp(
         home: LoginScreen(launcher: (_) async => true),
       ));
@@ -347,7 +368,8 @@ void main() {
           find.text('Could not verify the code. Please try again.'),
           findsOneWidget,
         );
-        expect(find.widgetWithText(FilledButton, 'Verify code'), findsOneWidget);
+        expect(
+            find.widgetWithText(FilledButton, 'Verify code'), findsOneWidget);
         expect(find.text(disclaimerShort), findsNothing);
       },
     );

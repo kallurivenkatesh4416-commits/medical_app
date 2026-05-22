@@ -61,7 +61,8 @@ class LoginScreen extends StatefulWidget {
   /// `registration_required: true`. The splash wires this to push the
   /// onboarding flow. Null is acceptable in tests (the registration path
   /// then surfaces an inline error so the failure is visible, not silent).
-  final void Function(BuildContext context, String phone)? onRegistrationRequired;
+  final void Function(BuildContext context, String phone)?
+      onRegistrationRequired;
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -153,7 +154,8 @@ class _LoginScreenState extends State<LoginScreen> {
     });
     if (ok.routed) return; // navigation already happened
     if (!ok.success) {
-      setState(() => _error = tr('Could not verify the code. Please try again.'));
+      setState(
+          () => _error = tr('Could not verify the code. Please try again.'));
     }
   }
 
@@ -230,88 +232,107 @@ class _LoginScreenState extends State<LoginScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text(
-                tr('Sign In'),
-                style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                tr('Use your registered phone number to receive a one-time code.'),
-                style: const TextStyle(fontSize: 16),
-              ),
-              const SizedBox(height: 18),
-              Semantics(
-                textField: true,
-                label: tr('Phone number'),
-                child: TextField(
-                  controller: _phone,
-                  keyboardType: TextInputType.phone,
-                  style: const TextStyle(fontSize: 18),
-                  decoration: InputDecoration(
-                    labelText: tr('Phone number'),
-                    border: const OutlineInputBorder(),
-                  ),
-                ),
-              ),
-              if (showSendCode) ...[
-                const SizedBox(height: 10),
-                Semantics(
-                  button: true,
-                  label: tr('Send code'),
-                  child: SizedBox(
-                    height: 48,
-                    child: OutlinedButton(
-                      onPressed: _busyRequest ? null : _sendCode,
-                      child: Text(
-                        _busyRequest ? tr('Sending…') : tr('Send code'),
+              Expanded(
+                child: SingleChildScrollView(
+                  keyboardDismissBehavior:
+                      ScrollViewKeyboardDismissBehavior.onDrag,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        tr('Sign In'),
+                        style: const TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        tr('Use your registered phone number to receive a one-time code.'),
                         style: const TextStyle(fontSize: 16),
                       ),
-                    ),
+                      const SizedBox(height: 18),
+                      Semantics(
+                        textField: true,
+                        label: tr('Phone number'),
+                        child: TextField(
+                          controller: _phone,
+                          keyboardType: TextInputType.phone,
+                          style: const TextStyle(fontSize: 18),
+                          decoration: InputDecoration(
+                            labelText: tr('Phone number'),
+                            border: const OutlineInputBorder(),
+                          ),
+                        ),
+                      ),
+                      if (showSendCode) ...[
+                        const SizedBox(height: 10),
+                        Semantics(
+                          button: true,
+                          label: tr('Send code'),
+                          child: SizedBox(
+                            height: 48,
+                            child: OutlinedButton(
+                              onPressed: _busyRequest ? null : _sendCode,
+                              child: Text(
+                                _busyRequest ? tr('Sending…') : tr('Send code'),
+                                style: const TextStyle(fontSize: 16),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 12),
+                      Semantics(
+                        textField: true,
+                        label: tr('One-time code'),
+                        child: TextField(
+                          controller: _code,
+                          keyboardType: TextInputType.number,
+                          style: const TextStyle(fontSize: 18),
+                          decoration: InputDecoration(
+                            labelText: tr('One-time code'),
+                            border: const OutlineInputBorder(),
+                            helperText: _codeRequested
+                                ? tr('Code sent to your phone.')
+                                : null,
+                          ),
+                        ),
+                      ),
+                      if (_info != null) ...[
+                        const SizedBox(height: 8),
+                        Text(_info!,
+                            style: const TextStyle(
+                                color: Color(0xFF34404F), fontSize: 14)),
+                      ],
+                      if (_error != null) ...[
+                        const SizedBox(height: 8),
+                        Text(_error!,
+                            style: const TextStyle(
+                                color: Colors.red, fontSize: 14)),
+                      ],
+                      const SizedBox(height: 16),
+                      Semantics(
+                        button: true,
+                        label: tr('Verify code'),
+                        child: SizedBox(
+                          height: 56,
+                          child: FilledButton(
+                            onPressed: _busyVerify ? null : _submit,
+                            child: Text(
+                              _busyVerify
+                                  ? tr('Verifying…')
+                                  : tr('Verify code'),
+                              style: const TextStyle(fontSize: 18),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-              ],
+              ),
               const SizedBox(height: 12),
-              Semantics(
-                textField: true,
-                label: tr('One-time code'),
-                child: TextField(
-                  controller: _code,
-                  keyboardType: TextInputType.number,
-                  style: const TextStyle(fontSize: 18),
-                  decoration: InputDecoration(
-                    labelText: tr('One-time code'),
-                    border: const OutlineInputBorder(),
-                    helperText: _codeRequested
-                        ? tr('Code sent to your phone.')
-                        : null,
-                  ),
-                ),
-              ),
-              if (_info != null) ...[
-                const SizedBox(height: 8),
-                Text(_info!,
-                    style: const TextStyle(color: Color(0xFF34404F), fontSize: 14)),
-              ],
-              if (_error != null) ...[
-                const SizedBox(height: 8),
-                Text(_error!, style: const TextStyle(color: Colors.red, fontSize: 14)),
-              ],
-              const SizedBox(height: 16),
-              Semantics(
-                button: true,
-                label: tr('Verify code'),
-                child: SizedBox(
-                  height: 56,
-                  child: FilledButton(
-                    onPressed: _busyVerify ? null : _submit,
-                    child: Text(
-                      _busyVerify ? tr('Verifying…') : tr('Verify code'),
-                      style: const TextStyle(fontSize: 18),
-                    ),
-                  ),
-                ),
-              ),
-              const Spacer(),
               Semantics(
                 button: true,
                 label: tr(callOneZeroEightLabel),

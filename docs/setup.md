@@ -105,10 +105,7 @@ Then:
   the brief's named stack — React Router v6 + TanStack Query v5 +
   Tailwind v3 + shadcn/ui — and the audit's P1 #4 token-paste UI is
   gone. Real OTP login: phone → `POST /auth/otp/request` (dev OTP
-  auto-fills against `APP_ENV=local`) → `POST /auth/otp/verify`. No
-  bearer token in `localStorage`: the access token lives only in
-  React state, the refresh token in `sessionStorage`, and silent
-  re-auth on browser refresh keeps the doctor signed in across reloads.
+  auto-fills against `APP_ENV=local`) → `POST /auth/otp/verify`.
   Routes: `/login` (public), `/alerts`, `/alerts/:caseId`,
   `/residents/:residentId` (PHI — doctor/nurse/ops only),
   `/admin/kpis`, `/admin/exports` (builder_admin only), `/403` for
@@ -117,8 +114,7 @@ Then:
   hospital handover PDF + email/WhatsApp dispatch). The patient
   profile page renders Slice 3/4/9 staff context (medical history,
   records via signed link, current medicines + adherence, family
-  contacts). Backend prereq: `CORSMiddleware` is mounted when
-  `DASHBOARD_ORIGINS` is set (default `http://localhost:5173`).
+  contacts).
 - Slice 17: scheduler infrastructure. The two patient-safety SLAs that
   were previously ops-triggered API calls now run periodically as a
   separate process. `docker compose up` brings up a new `scheduler`
@@ -141,8 +137,16 @@ Then:
   scan gateway: local/test use `VIRUS_SCAN_MODE=stub`; set
   `VIRUS_SCAN_MODE=clamav`, `CLAMAV_HOST`, and `CLAMAV_PORT` only when clamd
   is reachable on a private trusted path. The CI backend now has a separate Postgres lane for
-  production-only row-lock tests. Cookie auth + CSRF remains the focused
-  follow-up in `docs/SLICE18B-BRIEF.md`.
+  production-only row-lock tests.
+- Slice 18b: dashboard cookie auth + CSRF. The OTP verify request marks
+  dashboard sessions explicitly, so mobile keeps its bearer token JSON
+  contract while the staff dashboard receives host-only HttpOnly access,
+  refresh, and session cookies. Browser JS fetches the signed CSRF token
+  from `GET /api/v1/auth/csrf`, keeps it in memory, includes credentials on
+  API requests, and sends `X-CSRF-Token` on cookie-authenticated writes.
+  Cookie refresh rotation stays on `POST /api/v1/auth/refresh`; logout clears
+  the dashboard cookies. `DASHBOARD_ORIGINS` now enables exact-origin,
+  credentialed CORS for the dashboard (default `http://localhost:5173`).
 - Slice 16: production push + delivery webhooks. FCM HTTP v1 push lands
   via `FcmPushGateway` (uses the `google-auth` library for service-account
   credentials and OAuth2 token refresh — set `FCM_SERVICE_ACCOUNT_FILE`
@@ -249,7 +253,7 @@ real SMS provider. Seeded demo phones are `+15550000001`…`+15550000009`
 See `.env.example` (annotated). Provider keys (Twilio/FCM/AWS) are only needed from
 the slice that uses them; default `PROVIDER_MODE=stub` needs no external accounts.
 
-_Status: Slices 1-18 cover backend foundation (Slice 15 is the dashboard
+_Status: Slices 1-18b cover backend foundation (Slice 15 is the dashboard
 rebuild and re-uses the existing backend contract — no new slice
 number was added there), auth/RBAC/audit,
 onboarding/consent/profile, medical-record upload/list/link, the emergency
@@ -265,7 +269,8 @@ Slice 12 emergency hardening (fallback-tap outbox, stuck-notification reaper,
 mobile resident-path wire-up (OTP login, onboarding wizard, live medicine /
 records / consent surfaces, real `flutter_secure_storage` / `path_provider`
 / `connectivity_plus` / `file_picker`, and live access-token threading
-through the Slice 6 emergency API), and Slice 16 production push +
+through the Slice 6 emergency API), Slice 18b dashboard HttpOnly cookie
+auth + CSRF without changing the mobile bearer flow, and Slice 16 production push +
 delivery webhooks (FCM HTTP v1 via `google-auth`, composite gateway
 joining FCM and Twilio, Twilio status callback handler with signature
 validation, resident-side FCM ack endpoint, resident `/me/device-tokens`

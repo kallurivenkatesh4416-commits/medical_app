@@ -12,7 +12,7 @@ import { render } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 
-import { ApiClient, InMemoryStorage } from "../api/client";
+import { ApiClient } from "../api/client";
 import { AuthProvider } from "../auth/AuthContext";
 import App from "../App";
 
@@ -27,6 +27,8 @@ export type Route = {
   respond: () => FakeResponse | Promise<FakeResponse>;
   /** Capture the request body for later assertion (optional). */
   capture?: (body: unknown) => void;
+  /** Capture the raw fake fetch init to assert headers/credentials. */
+  captureRequest?: (init: RequestInit | undefined) => void;
 };
 
 export function makeFetch(routes: Route[]): typeof fetch {
@@ -39,6 +41,7 @@ export function makeFetch(routes: Route[]): typeof fetch {
       // Helpful failure rather than the cryptic "fetch is not a function"
       throw new Error(`Unmatched test request: ${key}`);
     }
+    route.captureRequest?.(init);
     if (route.capture && init?.body) {
       try {
         route.capture(JSON.parse(init.body as string));
@@ -56,7 +59,7 @@ export function makeFetch(routes: Route[]): typeof fetch {
 }
 
 export function makeClient(routes: Route[]): ApiClient {
-  return new ApiClient("http://api.test", new InMemoryStorage(), makeFetch(routes));
+  return new ApiClient("http://api.test", makeFetch(routes));
 }
 
 export function makeQueryClient(): QueryClient {
@@ -71,17 +74,11 @@ export function makeQueryClient(): QueryClient {
 export function renderApp({
   routes,
   initialPath = "/",
-  preAuth,
 }: {
   routes: Route[];
   initialPath?: string;
-  /** Pre-set session tokens so the bootstrap silent-refresh path
-   *  completes before the first render. Tests that exercise the
-   *  unauthenticated path leave this null. */
-  preAuth?: { access: string; refresh: string } | null;
 }) {
   const client = makeClient(routes);
-  if (preAuth) client.setSession(preAuth);
   const qc = makeQueryClient();
   const result = render(
     <MemoryRouter initialEntries={[initialPath]}>

@@ -11,6 +11,11 @@ from app.config import get_settings
 from app.db import engine
 from app.enums import NON_PHI_ROLES, Role
 from app.models.user import User
+from app.security.dashboard_session import (
+    dashboard_access_cookie,
+    mutating_cookie_request_needs_csrf,
+    verify_dashboard_csrf,
+)
 from app.security.jwt import (
     TokenError,
     decode_access_token,
@@ -37,13 +42,18 @@ def client_ip(request: Request) -> str | None:
 
 
 def get_current_user(
+    request: Request,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
     session: Session = Depends(get_db),
 ) -> User:
-    if creds is None or not creds.credentials:
+    used_cookie = not (creds and creds.credentials)
+    raw_access = (
+        creds.credentials if creds and creds.credentials else dashboard_access_cookie(request)
+    )
+    if not raw_access:
         raise HTTPException(status_code=401, detail="Not authenticated")
     try:
-        payload = decode_access_token(creds.credentials)
+        payload = decode_access_token(raw_access)
     except TokenError as exc:
         raise HTTPException(status_code=401, detail="Invalid token") from exc
 
@@ -55,6 +65,8 @@ def get_current_user(
     user = session.get(User, user_id)
     if user is None or not user.is_active or user.deleted_at is not None:
         raise HTTPException(status_code=401, detail="Inactive or unknown account")
+    if mutating_cookie_request_needs_csrf(request, used_cookie=used_cookie):
+        verify_dashboard_csrf(request)
     return user
 
 

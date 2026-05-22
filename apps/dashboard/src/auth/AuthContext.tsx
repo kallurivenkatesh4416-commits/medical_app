@@ -4,10 +4,8 @@
  * Owns:
  *   - The single `ApiClient` instance.
  *   - The current `User` (null when unauthenticated).
- *   - Bootstrap state — on first mount we attempt silent refresh via
- *     the sessionStorage token; until that resolves the rest of the
- *     app stays behind a loading splash so we never paint a "logged
- *     out" UI for a user who actually has a valid session.
+ *   - Bootstrap state — on first mount we probe the backend cookie session
+ *     and fetch CSRF before the rest of the app can issue writes.
  *
  * The provider value is intentionally narrow: `client`, `user`,
  * `status`, and a handful of imperative actions (`login`, `logout`).
@@ -60,7 +58,7 @@ export function AuthProvider({
   // Guard against the StrictMode double-effect re-bootstrapping.
   const bootstrapped = useRef(false);
 
-  // -------- bootstrap (silent refresh on reload) -----------------------
+  // -------- bootstrap (cookie session probe on reload) -----------------
   useEffect(() => {
     if (bootstrapped.current) return;
     bootstrapped.current = true;
@@ -114,7 +112,7 @@ export function AuthProvider({
   const verifyOtp = useCallback<AuthContextValue["verifyOtp"]>(
     async (phone, code) => {
       const out = await authApi.verifyOtp(client, phone, code);
-      if (out.registration_required || !out.access_token || !out.refresh_token) {
+      if (out.registration_required || out.session_transport !== "cookie") {
         // Slice 15 is the staff dashboard — resident registration is
         // the mobile app's path. Surface a clear error rather than
         // routing into an onboarding wizard that doesn't exist here.
@@ -122,7 +120,8 @@ export function AuthProvider({
           "This phone has no staff account. Use the resident app to register.",
         );
       }
-      client.setSession({ access: out.access_token, refresh: out.refresh_token });
+      const restored = await client.tryRestoreSession();
+      if (!restored) throw new Error("Dashboard session could not be established.");
       const me = await authApi.me(client);
       setUser(me);
       setStatus("authenticated");
@@ -133,10 +132,8 @@ export function AuthProvider({
 
   const logout = useCallback<AuthContextValue["logout"]>(async () => {
     try {
-      // Best-effort revoke. The client clears local storage either way.
-      const raw = (client as unknown as { storageRefresh?: () => string | null })
-        .storageRefresh?.();
-      if (raw) await authApi.logout(client, raw);
+      // Best-effort revoke. The client clears memory either way.
+      await authApi.logout(client);
     } catch {
       // network failures must not block local logout
     }

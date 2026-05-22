@@ -44,11 +44,10 @@
 - `apps/backend/scripts/load_emergency.py` drives a synthetic concurrent
   emergency-alert run and writes `docs/slice18-load-report.md`.
 
-## Deliberately deferred
+## Follow-up
 
-- Dashboard HttpOnly cookies and CSRF move to `docs/SLICE18B-BRIEF.md`.
-  Slice 15's in-memory access token plus per-tab refresh storage stays
-  unchanged in Slice 18.
+- Dashboard HttpOnly cookies and CSRF were isolated from Slice 18 by design.
+  Slice 18b implements that brief in `docs/SLICE18B-NOTES.md`.
 - AWS deployment, WAF/TLS, observability, secrets management, DPDP
   policy closure, mobile Firebase native wiring, and store release work.
 
