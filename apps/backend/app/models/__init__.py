@@ -5,7 +5,7 @@ SQLModel.metadata and installs the audit-log immutability guard.
 from sqlalchemy import event
 
 from app.models.audit import AuditLog
-from app.models.auth import OtpCode, RefreshToken
+from app.models.auth import OtpAttempt, OtpCode, RefreshToken
 from app.models.consent import Consent
 from app.models.emergency import (
     CaseEvent,
@@ -29,6 +29,7 @@ from app.models.user import User
 __all__ = [
     "AuditLog",
     "OtpCode",
+    "OtpAttempt",
     "RefreshToken",
     "Consent",
     "CaseEvent",

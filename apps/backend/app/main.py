@@ -33,6 +33,7 @@ from app.services.auth_service import AuthError
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    settings.validate_for_runtime()
     configure_logging(settings.log_level)
     log = get_logger("app")
 

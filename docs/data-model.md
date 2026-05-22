@@ -112,6 +112,13 @@
   is now populated from this table (the §8 placeholder is gone when any
   active schedule exists).
 
+- **Slice 18** (migration `0010_otp_attempts`): `otp_attempts` is the
+  pre-auth rate-limit ledger for OTP request and verify paths. It stores a
+  keyed phone fingerprint, optional source IP, attempt kind, and attempt
+  timestamp so sliding-window limits work across backend instances without
+  persisting another raw phone copy. The Slice 17 scheduler purges rows after
+  the short hardening retention window.
+
 - **Slice 10**: no new tables. The admin dashboard and monthly export are
   derived from existing tenant-scoped rows (`emergency_cases`, `residents`,
   `medical_records`, `medicine_schedules`, `medicine_dose_logs`, `consents`).

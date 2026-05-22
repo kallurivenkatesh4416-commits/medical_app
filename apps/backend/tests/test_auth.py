@@ -2,17 +2,44 @@
 
 from datetime import timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
-from app.enums import Role
+from app.config import Settings, get_settings
+from app.enums import AuditAction, Role
+from app.main import create_app
+from app.models.audit import AuditLog
 from app.models.auth import OtpCode, RefreshToken
 from app.models.base import utcnow
 from app.models.user import User
+from app.services import auth_service
 
 
 def _bearer(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "change-me-generate-a-long-random-string",
+        "short-secret",
+        "0" * 32,
+    ],
+)
+def test_non_local_runtime_rejects_weak_jwt_secrets(secret: str) -> None:
+    with pytest.raises(SystemExit, match="JWT_SECRET"):
+        Settings(app_env="prod", jwt_secret=secret).validate_for_runtime()
+
+
+def test_non_local_runtime_accepts_strong_jwt_secret(monkeypatch) -> None:
+    monkeypatch.setenv("APP_ENV", "prod")
+    monkeypatch.setenv("JWT_SECRET", "strong-slice-18-secret-material-for-runtime")
+    get_settings.cache_clear()
+    app = create_app()
+    assert app.title
+    get_settings.cache_clear()
 
 
 def test_otp_login_happy_path(client: TestClient, make_user, login) -> None:
@@ -84,6 +111,81 @@ def test_verified_phone_without_account_is_offered_registration(
     assert body["registration_required"] is True
     assert body["registration_token"]
     assert body["access_token"] is None
+
+
+def test_otp_request_rate_limit_audits_and_skips_sms(
+    client: TestClient, session: Session, monkeypatch
+) -> None:
+    class _Gateway:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        def send_sms(self, *, to: str, body: str) -> str:
+            self.sent.append(to)
+            return "stub-sms"
+
+    gateway = _Gateway()
+    monkeypatch.setattr(auth_service, "get_notification_gateway", lambda: gateway)
+    phone = "+15551110101"
+    for _ in range(3):
+        resp = client.post("/api/v1/auth/otp/request", json={"phone": phone})
+        assert resp.status_code == 200
+
+    limited = client.post("/api/v1/auth/otp/request", json={"phone": phone})
+    assert limited.status_code == 429
+    assert limited.json()["error"]["code"] == "otp_rate_limited"
+    assert gateway.sent == [phone, phone, phone]
+
+    entry = session.exec(
+        select(AuditLog).where(AuditLog.action == AuditAction.OTP_RATE_LIMITED.value)
+    ).one()
+    assert entry.meta["limit_kind"] == "phone_request"
+    assert phone not in str(entry.meta)
+
+
+def test_otp_request_rate_limits_by_source_ip(client: TestClient) -> None:
+    for i in range(30):
+        resp = client.post(
+            "/api/v1/auth/otp/request",
+            json={"phone": f"+1555222{i:04d}"},
+        )
+        assert resp.status_code == 200
+
+    limited = client.post(
+        "/api/v1/auth/otp/request",
+        json={"phone": "+15552229999"},
+    )
+    assert limited.status_code == 429
+    assert limited.json()["error"]["code"] == "otp_rate_limited"
+
+
+def test_otp_verify_rate_limit_precedes_code_attempts(
+    client: TestClient, make_user, session: Session, monkeypatch
+) -> None:
+    phone = "+15551110102"
+    make_user(Role.RESIDENT, phone=phone)
+    monkeypatch.setenv("OTP_MAX_ATTEMPTS", "20")
+    get_settings.cache_clear()
+    req = client.post("/api/v1/auth/otp/request", json={"phone": phone})
+    assert req.status_code == 200
+    otp = session.exec(select(OtpCode).where(OtpCode.phone == phone)).one()
+
+    for _ in range(10):
+        bad = client.post(
+            "/api/v1/auth/otp/verify", json={"phone": phone, "code": "000000"}
+        )
+        assert bad.status_code == 401
+
+    session.refresh(otp)
+    before = otp.attempts
+    limited = client.post(
+        "/api/v1/auth/otp/verify", json={"phone": phone, "code": "000000"}
+    )
+    session.refresh(otp)
+    assert limited.status_code == 429
+    assert limited.json()["error"]["code"] == "otp_rate_limited"
+    assert otp.attempts == before
+    get_settings.cache_clear()
 
 
 def test_refresh_rotation_and_reuse_detection(

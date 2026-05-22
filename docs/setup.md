@@ -134,6 +134,15 @@ Then:
   (`POST /api/v1/emergency/escalations/run`,
   `POST /api/v1/emergency/notifications/requeue-stuck`) stay as manual
   triggers for incident response. See `docs/SLICE17-NOTES.md`.
+- Slice 18: hardening pass. Non-local backend startup now refuses the
+  development `JWT_SECRET`, OTP request/verify windows are DB-rate-limited,
+  and the scheduler also purges old OTP limiter rows. Medical record upload
+  validates detected PDF/JPEG/PNG bytes before storage and calls a malware
+  scan gateway: local/test use `VIRUS_SCAN_MODE=stub`; set
+  `VIRUS_SCAN_MODE=clamav`, `CLAMAV_HOST`, and `CLAMAV_PORT` only when clamd
+  is reachable on a private trusted path. The CI backend now has a separate Postgres lane for
+  production-only row-lock tests. Cookie auth + CSRF remains the focused
+  follow-up in `docs/SLICE18B-BRIEF.md`.
 - Slice 16: production push + delivery webhooks. FCM HTTP v1 push lands
   via `FcmPushGateway` (uses the `google-auth` library for service-account
   credentials and OAuth2 token refresh — set `FCM_SERVICE_ACCOUNT_FILE`
@@ -200,6 +209,33 @@ uvicorn app.main:app --reload
 pytest
 ```
 
+### Slice 18 Postgres and load checks
+
+The default backend suite stays on in-memory SQLite. To exercise the
+Postgres-only refresh race locally, point the backend at a test database
+after it exists and is migrated:
+
+```powershell
+$env:DATABASE_URL = "postgresql+psycopg://medapp:change-me-local-only@localhost:5432/medapp_test"
+alembic upgrade head
+pytest -m postgres_only
+```
+
+Emergency load evidence is an out-of-process local/stub run. Start the
+backend, complete resident onboarding once, export that resident access token,
+then run:
+
+```powershell
+$env:RESIDENT_ACCESS_TOKEN = "<resident-access-token>"
+$env:REQUESTS = "100"
+$env:CONCURRENCY = "10"
+python scripts/load_emergency.py
+```
+
+The script writes `docs/slice18-load-report.md` with the command, status
+counts, and p50/p95/p99 latency. Do not reuse the local/stub numbers as live
+Twilio or FCM delivery telemetry.
+
 ### Logging in (dev)
 
 With `APP_ENV=local`, `POST /api/v1/auth/otp/request` returns the code in a
@@ -213,7 +249,7 @@ real SMS provider. Seeded demo phones are `+15550000001`…`+15550000009`
 See `.env.example` (annotated). Provider keys (Twilio/FCM/AWS) are only needed from
 the slice that uses them; default `PROVIDER_MODE=stub` needs no external accounts.
 
-_Status: Slices 1-17 cover backend foundation (Slice 15 is the dashboard
+_Status: Slices 1-18 cover backend foundation (Slice 15 is the dashboard
 rebuild and re-uses the existing backend contract — no new slice
 number was added there), auth/RBAC/audit,
 onboarding/consent/profile, medical-record upload/list/link, the emergency
@@ -236,7 +272,9 @@ validation, resident-side FCM ack endpoint, resident `/me/device-tokens`
 endpoint with audit, and a deferred-by-design mobile FCM seam). Live
 Twilio (SMS / voice / WhatsApp), live SMTP, and live FCM are wired and
 configured per `.env.example`. Slice 17 closes the 60s backup-escalation patient-safety SLA with a
-dedicated runner process. The only remaining operator-keys task is
+dedicated runner process. Slice 18 adds JWT/OTP/upload hardening, a ClamAV scan
+path, and Postgres refresh-contention verification. The only remaining
+operator-keys task is
 mobile Firebase project provisioning (Option A defer): a future
 micro-slice swaps `nullPushTokenProvider` for a `firebase_messaging`
 adapter once `google-services.json` / `GoogleService-Info.plist` land._

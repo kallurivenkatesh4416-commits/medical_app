@@ -5,14 +5,16 @@ users to exist (seeded). Refresh tokens are opaque, stored hashed, single-use
 (rotated on every refresh) with reuse detection.
 """
 
+import hashlib
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 
-from sqlmodel import Session, select
+from sqlalchemy import func, text
+from sqlmodel import Session, delete, select
 
 from app.config import get_settings
 from app.enums import AuditAction
-from app.models.auth import OtpCode, RefreshToken
+from app.models.auth import OtpAttempt, OtpCode, RefreshToken
 from app.models.base import utcnow
 from app.models.user import User
 from app.security.hashing import (
@@ -36,9 +38,174 @@ class AuthError(Exception):
 
 _now = utcnow
 
+OTP_REQUEST_KIND = "request"
+OTP_VERIFY_KIND = "verify"
+OTP_PHONE_WINDOW_SECONDS = 300
+OTP_IP_REQUEST_WINDOW_SECONDS = 3600
+OTP_ATTEMPT_RETENTION_SECONDS = 86_400
+
+
+def _count_attempts(
+    session: Session,
+    *,
+    kind: str,
+    since: datetime,
+    phone_fp: str | None = None,
+    from_ip: str | None = None,
+) -> int:
+    statement = select(func.count()).select_from(OtpAttempt).where(
+        OtpAttempt.kind == kind,
+        OtpAttempt.attempted_at >= since,
+    )
+    if phone_fp is not None:
+        statement = statement.where(OtpAttempt.phone_fp == phone_fp)
+    if from_ip is not None:
+        statement = statement.where(OtpAttempt.from_ip == from_ip)
+    return int(session.exec(statement).one())
+
+
+def _lock_otp_attempt_scopes(
+    session: Session,
+    *,
+    kind: str,
+    phone_fp: str,
+    from_ip: str | None,
+) -> None:
+    """Serialize limiter counts on Postgres before staging a new attempt.
+
+    A sliding-window ``count`` followed by an ``insert`` is otherwise racy
+    across backend workers when a scope is just below its limit. SQLite stays
+    sequential in local/tests; production uses transaction-scoped advisory
+    locks because there may be no existing row to lock for a new phone or IP.
+    """
+    bind = session.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+
+    scopes = {f"otp:{kind}:phone:{phone_fp}"}
+    if kind == OTP_REQUEST_KIND and from_ip is not None:
+        scopes.add(f"otp:{kind}:ip:{from_ip}")
+    for scope in sorted(scopes):
+        digest = hashlib.sha256(scope.encode()).digest()
+        lock_key = int.from_bytes(digest[:8], byteorder="big", signed=True)
+        session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": lock_key},
+        )
+
+
+def _reject_rate_limited(
+    session: Session,
+    *,
+    from_ip: str | None,
+    phone_fp: str,
+    limit_kind: str,
+    window_seconds: int,
+    observed_count: int,
+) -> None:
+    record_audit(
+        session,
+        action=AuditAction.OTP_RATE_LIMITED,
+        from_ip=from_ip,
+        purpose="auth.otp_rate_limit",
+        meta={
+            "phone_fp": phone_fp,
+            "limit_kind": limit_kind,
+            "window_seconds": window_seconds,
+            "observed_count": observed_count,
+        },
+    )
+    raise AuthError(429, "otp_rate_limited", "Too many code attempts. Try again later.")
+
+
+def _stage_otp_attempt(
+    session: Session,
+    *,
+    phone: str,
+    from_ip: str | None,
+    kind: str,
+) -> None:
+    settings = get_settings()
+    now = _now()
+    phone_fp = phone_fingerprint(phone)
+    _lock_otp_attempt_scopes(
+        session,
+        kind=kind,
+        phone_fp=phone_fp,
+        from_ip=from_ip,
+    )
+    phone_count = _count_attempts(
+        session,
+        kind=kind,
+        since=now - timedelta(seconds=OTP_PHONE_WINDOW_SECONDS),
+        phone_fp=phone_fp,
+    )
+    if kind == OTP_REQUEST_KIND:
+        if phone_count >= settings.otp_request_per_phone_per_5min:
+            _reject_rate_limited(
+                session,
+                from_ip=from_ip,
+                phone_fp=phone_fp,
+                limit_kind="phone_request",
+                window_seconds=OTP_PHONE_WINDOW_SECONDS,
+                observed_count=phone_count,
+            )
+        if from_ip is not None:
+            ip_count = _count_attempts(
+                session,
+                kind=kind,
+                since=now - timedelta(seconds=OTP_IP_REQUEST_WINDOW_SECONDS),
+                from_ip=from_ip,
+            )
+            if ip_count >= settings.otp_request_per_ip_per_hour:
+                _reject_rate_limited(
+                    session,
+                    from_ip=from_ip,
+                    phone_fp=phone_fp,
+                    limit_kind="ip_request",
+                    window_seconds=OTP_IP_REQUEST_WINDOW_SECONDS,
+                    observed_count=ip_count,
+                )
+    elif phone_count >= settings.otp_verify_per_phone_per_5min:
+        _reject_rate_limited(
+            session,
+            from_ip=from_ip,
+            phone_fp=phone_fp,
+            limit_kind="phone_verify",
+            window_seconds=OTP_PHONE_WINDOW_SECONDS,
+            observed_count=phone_count,
+        )
+
+    session.add(
+        OtpAttempt(
+            phone_fp=phone_fp,
+            from_ip=from_ip,
+            kind=kind,
+            attempted_at=now,
+        )
+    )
+
+
+def purge_old_otp_attempts(
+    session: Session,
+    *,
+    older_than_seconds: int = OTP_ATTEMPT_RETENTION_SECONDS,
+    now: datetime | None = None,
+) -> int:
+    cutoff = (now or _now()) - timedelta(seconds=older_than_seconds)
+    result = session.exec(delete(OtpAttempt).where(OtpAttempt.attempted_at < cutoff))
+    session.commit()
+    return int(result.rowcount or 0)
+
 
 def request_otp(session: Session, *, phone: str, from_ip: str | None) -> str:
     settings = get_settings()
+    _stage_otp_attempt(
+        session,
+        phone=phone,
+        from_ip=from_ip,
+        kind=OTP_REQUEST_KIND,
+    )
     code = new_numeric_otp(settings.otp_length)
 
     # Invalidate any still-open codes for this phone (one live code at a time).
@@ -99,6 +266,12 @@ def consume_otp(
 ) -> User | None:
     """Validate + consume an OTP. Returns the active User, or None when the
     phone is verified but has no account yet (caller offers registration)."""
+    _stage_otp_attempt(
+        session,
+        phone=phone,
+        from_ip=from_ip,
+        kind=OTP_VERIFY_KIND,
+    )
     otp = session.exec(
         select(OtpCode)
         .where(OtpCode.phone == phone, OtpCode.consumed_at.is_(None))  # type: ignore[union-attr]

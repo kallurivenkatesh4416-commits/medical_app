@@ -931,11 +931,12 @@ def test_lifecycle_rejects_invalid_order_and_restricts_outcomes(
     assert bad_order.status_code == 409
     assert bad_order.json()["error"]["code"] == "invalid_case_transition"
 
+    doctor_headers = _auth(client, login, doctor)
     for target in (CaseStatus.ACKNOWLEDGED, CaseStatus.EN_ROUTE, CaseStatus.ON_SITE):
         ok = client.post(
             f"/api/v1/emergency/alerts/{case_id}/transition",
             json={"target_status": target.value},
-            headers=_auth(client, login, doctor),
+            headers=doctor_headers,
         )
         assert ok.status_code == 200, ok.text
 

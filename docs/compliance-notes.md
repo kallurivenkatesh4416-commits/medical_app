@@ -75,6 +75,10 @@
 
 - Medical-record uploads accept PDF/JPEG/PNG only, enforce the configured size
   limit, sanitize download filenames, and store bytes through `StorageGateway`.
+- Slice 18 adds a byte-level PDF/JPEG/PNG check before storage and a
+  `VirusScanGateway` before the object write. Local/test use a deterministic
+  EICAR-aware stub; configured ClamAV scans fail closed when clamd is
+  unavailable. Rejections write PHI-safe audit metadata only.
 - Stub storage encrypts local blobs with a Fernet key derived from the app
   secret. Live storage writes S3 objects with SSE-KMS when configured, falling
   back to SSE-S3 (`AES256`) otherwise.

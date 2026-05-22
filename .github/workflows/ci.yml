@@ -19,6 +19,39 @@ jobs:
       - run: ruff check .
       - run: pytest
 
+  backend-postgres:
+    needs: backend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/backend
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: medapp
+          POSTGRES_PASSWORD: change-me-ci-only
+          POSTGRES_DB: medapp_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U medapp -d medapp_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+psycopg://medapp:change-me-ci-only@localhost:5432/medapp_test
+      APP_ENV: local
+      PROVIDER_MODE: stub
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: alembic upgrade head
+      - run: pytest -m postgres_only
+
   web:
     runs-on: ubuntu-latest
     steps:

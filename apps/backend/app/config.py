@@ -8,6 +8,8 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+DEFAULT_JWT_SECRET = "change-me-generate-a-long-random-string"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -77,7 +79,7 @@ class Settings(BaseSettings):
         return [n.strip() for n in self.national_emergency_numbers.split(",") if n.strip()]
 
     # --- Auth / JWT (short-lived access + refresh; RBAC) ---
-    jwt_secret: str = "change-me-generate-a-long-random-string"
+    jwt_secret: str = DEFAULT_JWT_SECRET
     jwt_algorithm: str = "HS256"
     jwt_access_ttl_seconds: int = 900
     jwt_refresh_ttl_seconds: int = 1_209_600
@@ -86,6 +88,9 @@ class Settings(BaseSettings):
     otp_ttl_seconds: int = 300
     otp_length: int = 6
     otp_max_attempts: int = 5
+    otp_request_per_phone_per_5min: int = 3
+    otp_request_per_ip_per_hour: int = 30
+    otp_verify_per_phone_per_5min: int = 10
 
     # Short-lived grant issued after OTP verify when no account exists yet,
     # consumed by the onboarding endpoint to create the resident.
@@ -108,6 +113,12 @@ class Settings(BaseSettings):
     # Base used to build stub signed download links.
     public_base_url: str = "http://localhost:8000"
     max_upload_bytes: int = 15_728_640  # 15 MiB
+    # Uploaded medical records are scanned before they reach storage. Keep
+    # this separate from notification/storage provider mode so a live provider
+    # deploy cannot accidentally imply malware scanning.
+    virus_scan_mode: str = "stub"
+    clamav_host: str | None = None
+    clamav_port: int = 3310
 
     # --- Hospital handover PDF (Slice 8) ---
     # Mailhog in docker-compose. Live SMTP / SES credentials are picked up
@@ -122,6 +133,25 @@ class Settings(BaseSettings):
     # Twilio WhatsApp sender (e.g. 'whatsapp:+14155238886'). Used only when
     # provider_mode='live'; the stub gateway ignores it.
     twilio_whatsapp_from: str | None = None
+
+    def validate_for_runtime(self) -> None:
+        """Reject dev JWT secrets outside the zero-keys local/test path."""
+        if self.app_env.lower() in {"local", "test"}:
+            return
+        secret = self.jwt_secret
+        if secret == DEFAULT_JWT_SECRET:
+            raise SystemExit(
+                "JWT_SECRET must be set outside local/test; the development "
+                "placeholder is not accepted."
+            )
+        if len(secret) < 32:
+            raise SystemExit(
+                "JWT_SECRET must be at least 32 characters outside local/test."
+            )
+        if len(set(secret)) == 1:
+            raise SystemExit(
+                "JWT_SECRET must not be a repeated-character value outside local/test."
+            )
 
 
 @lru_cache

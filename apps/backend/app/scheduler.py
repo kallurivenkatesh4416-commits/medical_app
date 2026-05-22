@@ -63,6 +63,7 @@ from app.config import get_settings
 from app.db import engine
 from app.logging import configure_logging, get_logger
 from app.models.project import Project
+from app.services.auth_service import purge_old_otp_attempts
 from app.services.emergency_service import (
     escalate_stale_alerts,
     requeue_stuck_notification_attempts,
@@ -78,12 +79,17 @@ class TickResult:
 
     escalations: int = 0
     reaped: int = 0
+    otp_attempts_purged: int = 0
     projects_scanned: int = 0
     errors: int = 0
 
     @property
     def idle(self) -> bool:
-        return self.escalations == 0 and self.reaped == 0
+        return (
+            self.escalations == 0
+            and self.reaped == 0
+            and self.otp_attempts_purged == 0
+        )
 
 
 SessionFactory = Callable[[], Session]
@@ -124,6 +130,12 @@ def run_once(
     """
     factory = session_factory or _default_session_factory
     result = TickResult()
+    try:
+        with factory() as session:
+            result.otp_attempts_purged = purge_old_otp_attempts(session, now=now)
+    except Exception as exc:  # noqa: BLE001
+        result.errors += 1
+        _log.error("scheduler_auth_cleanup_error", error=exc.__class__.__name__)
     with factory() as session:
         project_ids = _iter_project_ids(session)
     result.projects_scanned = len(project_ids)
@@ -206,6 +218,7 @@ def run_loop(
                     "scheduler_tick",
                     escalations=result.escalations,
                     reaped=result.reaped,
+                    otp_attempts_purged=result.otp_attempts_purged,
                     projects=result.projects_scanned,
                     errors=result.errors,
                 )
@@ -264,6 +277,7 @@ def main() -> None:
             "scheduler_once_complete",
             escalations=result.escalations,
             reaped=result.reaped,
+            otp_attempts_purged=result.otp_attempts_purged,
             projects=result.projects_scanned,
             errors=result.errors,
         )

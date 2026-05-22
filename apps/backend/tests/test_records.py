@@ -206,6 +206,112 @@ def test_upload_validation_blocks_bad_type_and_oversize(
     assert too_large.json()["error"]["code"] == "file_too_large"
 
 
+def test_upload_rejects_declared_type_mismatch_before_storage(
+    client: TestClient, project: Project, session: Session
+) -> None:
+    access, _ = _onboard(client, project, session, "+15558880015")
+    png = b"\x89PNG\r\n\x1a\n" + b"slice-18"
+
+    mismatch = _upload(
+        client,
+        access,
+        body=png,
+        content_type="application/pdf",
+        filename="mask.pdf",
+    )
+
+    assert mismatch.status_code == 422
+    assert mismatch.json()["error"]["code"] == "file_type_mismatch"
+    assert session.exec(select(MedicalRecord)).all() == []
+    rejected = session.exec(
+        select(AuditLog).where(
+            AuditLog.action == AuditAction.RECORD_UPLOAD_REJECTED.value
+        )
+    ).one()
+    assert rejected.meta == {
+        "declared_type": "application/pdf",
+        "sniffed_type": "image/png",
+        "size_bytes": len(png),
+        "reason": "mime_mismatch",
+    }
+
+
+def test_upload_stores_detected_type_and_rejects_unknown_bytes(
+    client: TestClient, project: Project, session: Session
+) -> None:
+    access, _ = _onboard(client, project, session, "+15558880016")
+    jpeg = b"\xff\xd8\xff\xe0" + b"slice-18-jpeg"
+    mismatch = _upload(
+        client,
+        access,
+        key="jpeg-mask",
+        body=jpeg,
+        filename="scan.png",
+        content_type="image/png",
+    )
+    assert mismatch.status_code == 422
+    assert mismatch.json()["error"]["code"] == "file_type_mismatch"
+
+    unknown = _upload(
+        client,
+        access,
+        key="unknown",
+        body=b"tiny",
+        content_type="application/pdf",
+    )
+    assert unknown.status_code == 422
+    assert unknown.json()["error"]["code"] == "file_type_mismatch"
+
+    good = _upload(client, access, key="good-detected")
+    assert good.status_code == 200, good.text
+    rec = session.get(MedicalRecord, uuid.UUID(good.json()["id"]))
+    assert rec.content_type == "application/pdf"
+
+
+def test_upload_stub_virus_scan_quarantines_eicar(
+    client: TestClient, project: Project, session: Session
+) -> None:
+    access, _ = _onboard(client, project, session, "+15558880017")
+    eicar = (
+        b"%PDF-1.4\n"
+        b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$"
+        b"EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
+    )
+
+    quarantined = _upload(client, access, body=eicar, key="eicar")
+
+    assert quarantined.status_code == 422
+    assert quarantined.json()["error"]["code"] == "record_quarantined"
+    assert session.exec(select(MedicalRecord)).all() == []
+    rejected = session.exec(
+        select(AuditLog).where(
+            AuditLog.action == AuditAction.RECORD_UPLOAD_REJECTED.value
+        )
+    ).one()
+    assert rejected.meta["reason"] == "virus_signature"
+    assert rejected.meta["signature"] == "Eicar-Test-Signature"
+    assert rejected.meta["scanner"] == "stub"
+
+
+def test_upload_fails_closed_when_clamav_is_not_configured(
+    client: TestClient,
+    project: Project,
+    session: Session,
+    monkeypatch,
+) -> None:
+    access, _ = _onboard(client, project, session, "+15558880018")
+    monkeypatch.setenv("VIRUS_SCAN_MODE", "clamav")
+    monkeypatch.delenv("CLAMAV_HOST", raising=False)
+    get_settings.cache_clear()
+
+    unavailable = _upload(client, access, key="clamav")
+
+    assert unavailable.status_code == 502
+    assert unavailable.json()["error"]["code"] == "record_scan_unavailable"
+    assert session.exec(select(MedicalRecord)).all() == []
+    get_settings.cache_clear()
+
+
 def test_staff_records_are_consent_gated_phi_blocked_and_tenant_isolated(
     client: TestClient, project: Project, session: Session, make_user, login
 ) -> None:

@@ -9,6 +9,7 @@ from datetime import date
 
 from sqlmodel import Session, select
 
+from app.config import get_settings
 from app.enums import AuditAction, ConsentType, MedicalRecordType
 from app.models.medical_record import MedicalRecord
 from app.models.resident import Resident
@@ -18,19 +19,55 @@ from app.services.audit import record_audit
 from app.services.auth_service import AuthError
 from app.services.residents_service import assert_consent, get_resident_for_user
 from app.services.storage import get_storage_gateway, safe_download_name
+from app.services.virus_scan import VirusScanUnavailable, get_virus_scan_gateway
 
 ALLOWED_CONTENT_TYPES = {"application/pdf", "image/jpeg", "image/png"}
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
 def _validate(content_type: str, size: int, record_type: str) -> None:
-    from app.config import get_settings
-
     if content_type not in ALLOWED_CONTENT_TYPES:
         raise AuthError(415, "unsupported_type", "Only PDF, JPEG or PNG is accepted.")
     if size <= 0 or size > get_settings().max_upload_bytes:
         raise AuthError(413, "file_too_large", "File is empty or exceeds the size limit.")
     if record_type not in {t.value for t in MedicalRecordType}:
         raise AuthError(422, "invalid_record_type", "Unknown record type.")
+
+
+def sniff_content_type(data: bytes) -> str | None:
+    """Narrow detector for the only medical record types the MVP accepts."""
+    if data.startswith(b"%PDF-"):
+        return "application/pdf"
+    if data.startswith(_PNG_SIGNATURE):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    return None
+
+
+def _reject_upload(
+    session: Session,
+    *,
+    uploader: User,
+    resident: Resident,
+    from_ip: str | None,
+    status_code: int,
+    code: str,
+    message: str,
+    meta: dict,
+) -> None:
+    record_audit(
+        session,
+        action=AuditAction.RECORD_UPLOAD_REJECTED,
+        actor_user_id=uploader.id,
+        project_id=resident.project_id,
+        resource_type="resident",
+        resource_id=str(resident.id),
+        from_ip=from_ip,
+        purpose="records.upload_rejected",
+        meta=meta,
+    )
+    raise AuthError(status_code, code, message)
 
 
 def serialize_record(r: MedicalRecord) -> dict:
@@ -64,13 +101,68 @@ def upload_record(
 ) -> MedicalRecord:
     _validate(content_type, len(data), record_type)
     file_name = safe_download_name(file_name)
+    sniffed_content_type = sniff_content_type(data)
+    if sniffed_content_type is None or sniffed_content_type != content_type:
+        detected = sniffed_content_type or "unknown"
+        _reject_upload(
+            session,
+            uploader=uploader,
+            resident=resident,
+            from_ip=from_ip,
+            status_code=422,
+            code="file_type_mismatch",
+            message=(
+                "Declared file type "
+                f"{content_type} does not match detected file type {detected}."
+            ),
+            meta={
+                "declared_type": content_type,
+                "sniffed_type": detected,
+                "size_bytes": len(data),
+                "reason": "mime_mismatch",
+            },
+        )
+
+    try:
+        scan = get_virus_scan_gateway().scan(data=data, file_name=file_name)
+    except VirusScanUnavailable:
+        _reject_upload(
+            session,
+            uploader=uploader,
+            resident=resident,
+            from_ip=from_ip,
+            status_code=502,
+            code="record_scan_unavailable",
+            message="Could not scan medical record.",
+            meta={
+                "reason": "scan_unavailable",
+                "size_bytes": len(data),
+                "scanner": get_settings().virus_scan_mode.lower(),
+            },
+        )
+    if not scan.clean:
+        _reject_upload(
+            session,
+            uploader=uploader,
+            resident=resident,
+            from_ip=from_ip,
+            status_code=422,
+            code="record_quarantined",
+            message="Upload rejected by virus scan.",
+            meta={
+                "reason": "virus_signature",
+                "size_bytes": len(data),
+                "signature": scan.signature,
+                "scanner": scan.scanner,
+            },
+        )
 
     # Server-generated opaque key (no user input -> no path/key injection).
     storage_key = uuid.uuid4().hex
     # Write the encrypted blob first; a later DB failure only orphans a blob
     # (harmless, swept by future GC) — it never leaves a row without its file.
     get_storage_gateway().put_encrypted(
-        key=storage_key, data=data, content_type=content_type
+        key=storage_key, data=data, content_type=sniffed_content_type
     )
 
     record = MedicalRecord(
@@ -78,7 +170,7 @@ def upload_record(
         project_id=resident.project_id,
         storage_key=storage_key,
         file_name=file_name,
-        content_type=content_type,
+        content_type=sniffed_content_type,
         record_type=record_type,
         record_date=record_date,
         source=source,

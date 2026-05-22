@@ -139,6 +139,7 @@ export type FallbackChannel = (typeof FallbackChannel)[keyof typeof FallbackChan
 /** Audit action wire tokens mirrored from the backend enum. */
 export const AuditAction = {
   OTP_REQUESTED: "otp_requested",
+  OTP_RATE_LIMITED: "otp_rate_limited",
   OTP_VERIFY_FAILED: "otp_verify_failed",
   LOGIN_SUCCEEDED: "login_succeeded",
   TOKEN_REFRESHED: "token_refreshed",
@@ -151,6 +152,7 @@ export const AuditAction = {
   PATIENT_PROFILE_READ: "patient_profile_read",
   ACCOUNT_CLOSURE_INITIATED: "account_closure_initiated",
   RECORD_UPLOADED: "record_uploaded",
+  RECORD_UPLOAD_REJECTED: "record_upload_rejected",
   RECORD_LIST: "record_list",
   RECORD_LINK_ISSUED: "record_link_issued",
   EMERGENCY_ALERT_CREATED: "emergency_alert_created",

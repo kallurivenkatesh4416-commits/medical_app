@@ -70,6 +70,9 @@ extend-immutable-calls = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "postgres_only: production-path tests that require Postgres row locking",
+]
 
 [tool.coverage.run]
 source = ["app"]

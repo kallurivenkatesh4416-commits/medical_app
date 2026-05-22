@@ -34,6 +34,7 @@ from app.enums import (
     NotificationStatus,
     Role,
 )
+from app.models.auth import OtpAttempt
 from app.models.base import utcnow
 from app.models.emergency import (
     CaseEvent,
@@ -44,6 +45,7 @@ from app.models.on_call import OnCallSchedule
 from app.models.project import Project
 from app.models.resident import Resident
 from app.models.user import User
+from app.services.audit import phone_fingerprint
 from app.services.emergency_service import BACKUP_ESCALATED_EVENT
 
 # --------------------------------------------------------------------------- #
@@ -278,6 +280,33 @@ def test_run_once_is_quiet_with_no_work_to_do(session: Session, project: Project
         ).first()
         is None
     )
+
+
+def test_run_once_purges_old_otp_attempt_rows(session: Session, project: Project):
+    session.add(
+        OtpAttempt(
+            phone_fp=phone_fingerprint("+15553330001"),
+            from_ip="testclient",
+            kind="request",
+            attempted_at=utcnow() - timedelta(days=2),
+        )
+    )
+    session.add(
+        OtpAttempt(
+            phone_fp=phone_fingerprint("+15553330002"),
+            from_ip="testclient",
+            kind="request",
+            attempted_at=utcnow(),
+        )
+    )
+    session.commit()
+
+    result = scheduler.run_once(session_factory=_session_factory)
+
+    assert result.otp_attempts_purged == 1
+    attempts = session.exec(select(OtpAttempt)).all()
+    assert len(attempts) == 1
+    assert attempts[0].phone_fp == phone_fingerprint("+15553330002")
 
 
 def test_run_once_isolates_per_project_errors(

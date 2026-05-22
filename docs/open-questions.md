@@ -105,11 +105,14 @@
 - **Surfaced in:** Slice 12 / `emergency_service._claim_attempt`,
   `emergency_service.requeue_stuck_notification_attempts`.
 
-### `[HARDENING]` Postgres-backed concurrency test for refresh rotation
-- **What:** `rotate_refresh` relies on `SELECT ... FOR UPDATE` row locking. The
-  lock path only exists on Postgres; local/CI tests run on SQLite (which
-  ignores `FOR UPDATE`), so the true multi-process race is not exercised.
-- **Plan:** add a Postgres service to CI and a concurrency test that fires two
-  simultaneous refreshes and asserts exactly one survives and replay revokes
-  the family. Fits the Slice 12 hardening pass.
-- **Surfaced in:** Slice 2 review (auth_service.rotate_refresh).
+### `[RESOLVED-SLICE-18]` Postgres-backed concurrency test for refresh rotation
+- **Original hardening item:** `rotate_refresh` relies on `SELECT ... FOR
+  UPDATE` row locking. The lock path only exists on Postgres; the default
+  SQLite suite cannot prove the true contention behavior.
+- **Resolution:** Slice 18 keeps SQLite as the fast default backend test lane
+  and adds a Postgres CI lane for tests marked `postgres_only`. The new
+  refresh-rotation race test starts two independent sessions against the same
+  refresh token and proves exactly one rotation succeeds while reuse revokes
+  the whole token family.
+- **Surfaced in:** Slice 2 review, `apps/backend/tests/test_auth_postgres.py`,
+  `.github/workflows/ci.yml`.
