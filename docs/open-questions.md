@@ -12,18 +12,23 @@
 
 ## Items
 
-### `[NEEDS_OPS_DECISION]` Backup-escalation trigger infrastructure
-- **Question:** What runs the 60s no-ack backup escalation in production — a
-  cron/worker, a queue with delayed messages, or an external scheduler?
-- **Why it matters:** Escalation must fire reliably even with no inbound
-  request; the timing is a patient-safety SLA, not a best-effort job.
-- **Technical default applied:** the escalation logic lives in a single
-  idempotent service function (`emergency_service.escalate_stale_alerts`)
-  exposed via `POST /api/v1/emergency/escalations/run` (ops-only,
-  tenant-scoped). A scheduler/worker calls the same function unchanged once
-  infra lands; the `backup_escalated` `case_events` row makes repeat runs safe.
-- **Surfaced in:** Slice 6 / `app/services/emergency_service.py`,
-  `app/api/emergency.py`
+### `[RESOLVED-SLICE-17]` Backup-escalation trigger infrastructure
+- **Original question:** What runs the 60s no-ack backup escalation in
+  production — a cron/worker, a queue with delayed messages, or an
+  external scheduler?
+- **Resolution:** Slice 17 ships `apps/backend/app/scheduler.py` — a
+  tiny `run_once`/`run_loop` runner that iterates every project and
+  calls the existing idempotent service functions (`escalate_stale_alerts`
+  + `requeue_stuck_notification_attempts`). Local/dev wiring: a separate
+  `scheduler` service in `docker-compose.yml` runs the same backend
+  image with the command overridden to `python -m app.scheduler --mode
+  loop`. Production maps cleanly: an ECS Fargate task / Kubernetes
+  Deployment running the same image, or AWS EventBridge → Lambda
+  driving `--mode once` on a cron rule. Per-project errors are
+  isolated; SIGTERM / stop-event preempt the tick sleep; over-firing
+  is safe because both service functions are idempotent.
+- **Surfaced in:** Slice 17 / `apps/backend/app/scheduler.py`,
+  `docker-compose.yml`, `docs/SLICE17-NOTES.md`
 
 ### `[RESOLVED-SLICE-14]` Mobile pending-alert store location
 - **Original question:** Where should the durable pending-alert file live in

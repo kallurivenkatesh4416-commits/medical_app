@@ -101,6 +101,21 @@ Then:
   with `POST /api/v1/emergency/notifications/requeue-stuck`; the age gate is
   `NOTIFICATION_STUCK_CLAIM_SECONDS`. The load/2G/coverage proof is in
   `docs/slice12-hardening-report.md`.
+- Slice 17: scheduler infrastructure. The two patient-safety SLAs that
+  were previously ops-triggered API calls now run periodically as a
+  separate process. `docker compose up` brings up a new `scheduler`
+  service (same backend image, command overridden to
+  `python -m app.scheduler --mode loop`) that ticks every
+  `SCHEDULER_TICK_SECONDS` (default 5) and, per project, calls the
+  existing idempotent service functions `escalate_stale_alerts` and
+  `requeue_stuck_notification_attempts`. Worst-case backup paging is
+  `EMERGENCY_ACK_TIMEOUT_SECONDS + SCHEDULER_TICK_SECONDS` (default
+  65s). Production maps the same image to an ECS Fargate task or a
+  Kubernetes `Deployment`; AWS EventBridge → Lambda can also drive
+  `--mode once` on a cron rule. The ops endpoints
+  (`POST /api/v1/emergency/escalations/run`,
+  `POST /api/v1/emergency/notifications/requeue-stuck`) stay as manual
+  triggers for incident response. See `docs/SLICE17-NOTES.md`.
 - Slice 16: production push + delivery webhooks. FCM HTTP v1 push lands
   via `FcmPushGateway` (uses the `google-auth` library for service-account
   credentials and OAuth2 token refresh — set `FCM_SERVICE_ACCOUNT_FILE`
@@ -180,7 +195,7 @@ real SMS provider. Seeded demo phones are `+15550000001`…`+15550000009`
 See `.env.example` (annotated). Provider keys (Twilio/FCM/AWS) are only needed from
 the slice that uses them; default `PROVIDER_MODE=stub` needs no external accounts.
 
-_Status: Slices 1-16 cover backend foundation, auth/RBAC/audit,
+_Status: Slices 1-17 cover backend foundation, auth/RBAC/audit,
 onboarding/consent/profile, medical-record upload/list/link, the emergency
 happy path with dashboard feed, emergency hardening (3-channel fan-out,
 on-call resolution, 60s backup escalation, mobile offline retry + fallback
@@ -200,7 +215,8 @@ joining FCM and Twilio, Twilio status callback handler with signature
 validation, resident-side FCM ack endpoint, resident `/me/device-tokens`
 endpoint with audit, and a deferred-by-design mobile FCM seam). Live
 Twilio (SMS / voice / WhatsApp), live SMTP, and live FCM are wired and
-configured per `.env.example`. The only remaining operator-keys task is
+configured per `.env.example`. Slice 17 closes the 60s backup-escalation patient-safety SLA with a
+dedicated runner process. The only remaining operator-keys task is
 mobile Firebase project provisioning (Option A defer): a future
 micro-slice swaps `nullPushTokenProvider` for a `firebase_messaging`
 adapter once `google-services.json` / `GoogleService-Info.plist` land._

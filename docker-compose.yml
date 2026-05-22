@@ -36,6 +36,27 @@ services:
       localstack:
         condition: service_started
 
+  # Slice 17 — runner for the 60s no-ack backup escalation + the
+  # stuck-claim notification reaper. Same image, same env, separate
+  # process. Production maps this to an ECS Fargate task, a Kubernetes
+  # Deployment, or an EventBridge→Lambda cron — see docs/SLICE17-NOTES.md.
+  scheduler:
+    build:
+      context: ./apps/backend
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-medapp}:${POSTGRES_PASSWORD:-change-me-local-only}@postgres:5432/${POSTGRES_DB:-medapp}
+    # Override the backend's CMD: no migrations / no HTTP server, just
+    # the runner. The backend service already runs `alembic upgrade head`
+    # at startup so the scheduler is safe to start in parallel — depends_on
+    # only waits for Postgres to be reachable.
+    command: ["python", "-m", "app.scheduler", "--mode", "loop"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
   localstack:
     image: localstack/localstack:3
     environment:

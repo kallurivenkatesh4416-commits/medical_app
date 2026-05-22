@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     # The ONLY hardcoded fallback numbers (brief §2.2); everything else is
     # resolved from project settings / the active on-call schedule.
     national_emergency_numbers: str = "108,112"
+    # Slice 17 — periodic runner cadence. Each tick calls the two
+    # idempotent emergency SLAs: backup escalation (no-ack > 60s) and
+    # stuck-claim reaper (provider crashed mid-send). Both service
+    # functions are idempotent so over-firing is safe; a tighter tick
+    # narrows the worst-case escalation latency. Worst-case backup
+    # paging time is `emergency_ack_timeout_seconds + scheduler_tick_seconds`.
+    scheduler_tick_seconds: int = 5
 
     @property
     def national_emergency_number_list(self) -> list[str]:
