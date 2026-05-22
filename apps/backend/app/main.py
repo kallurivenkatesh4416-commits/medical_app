@@ -6,6 +6,7 @@ Slice 2: OTP auth, JWT, RBAC, append-only audit log.
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import __version__
@@ -44,6 +45,22 @@ def create_app() -> FastAPI:
             "replace emergency hospital care."
         ),
     )
+
+    # Slice 15 — CORS for the Vite dashboard at http://localhost:5173 in
+    # dev. Production sets DASHBOARD_ORIGINS to the deployed dashboard
+    # host(s). Credentials are not enabled by default — Slice 15 uses
+    # bearer tokens in-memory (no cookies). When cookie auth lands in
+    # a later hardening slice, allow_credentials should flip to True
+    # alongside the cookie + CSRF refactor.
+    origins = settings.dashboard_origins_list
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
+            allow_credentials=False,
+        )
 
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)

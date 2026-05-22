@@ -101,6 +101,24 @@ Then:
   with `POST /api/v1/emergency/notifications/requeue-stuck`; the age gate is
   `NOTIFICATION_STUCK_CLAIM_SECONDS`. The load/2G/coverage proof is in
   `docs/slice12-hardening-report.md`.
+- Slice 15: dashboard rebuild. The doctor + admin dashboard now uses
+  the brief's named stack — React Router v6 + TanStack Query v5 +
+  Tailwind v3 + shadcn/ui — and the audit's P1 #4 token-paste UI is
+  gone. Real OTP login: phone → `POST /auth/otp/request` (dev OTP
+  auto-fills against `APP_ENV=local`) → `POST /auth/otp/verify`. No
+  bearer token in `localStorage`: the access token lives only in
+  React state, the refresh token in `sessionStorage`, and silent
+  re-auth on browser refresh keeps the doctor signed in across reloads.
+  Routes: `/login` (public), `/alerts`, `/alerts/:caseId`,
+  `/residents/:residentId` (PHI — doctor/nurse/ops only),
+  `/admin/kpis`, `/admin/exports` (builder_admin only), `/403` for
+  role mismatches. The case detail page drives the full Slice 7/8
+  workflow (lifecycle transitions, vitals, telemedicine notes,
+  hospital handover PDF + email/WhatsApp dispatch). The patient
+  profile page renders Slice 3/4/9 staff context (medical history,
+  records via signed link, current medicines + adherence, family
+  contacts). Backend prereq: `CORSMiddleware` is mounted when
+  `DASHBOARD_ORIGINS` is set (default `http://localhost:5173`).
 - Slice 17: scheduler infrastructure. The two patient-safety SLAs that
   were previously ops-triggered API calls now run periodically as a
   separate process. `docker compose up` brings up a new `scheduler`
@@ -195,7 +213,9 @@ real SMS provider. Seeded demo phones are `+15550000001`…`+15550000009`
 See `.env.example` (annotated). Provider keys (Twilio/FCM/AWS) are only needed from
 the slice that uses them; default `PROVIDER_MODE=stub` needs no external accounts.
 
-_Status: Slices 1-17 cover backend foundation, auth/RBAC/audit,
+_Status: Slices 1-17 cover backend foundation (Slice 15 is the dashboard
+rebuild and re-uses the existing backend contract — no new slice
+number was added there), auth/RBAC/audit,
 onboarding/consent/profile, medical-record upload/list/link, the emergency
 happy path with dashboard feed, emergency hardening (3-channel fan-out,
 on-call resolution, 60s backup escalation, mobile offline retry + fallback

@@ -62,6 +62,16 @@ class Settings(BaseSettings):
     # paging time is `emergency_ack_timeout_seconds + scheduler_tick_seconds`.
     scheduler_tick_seconds: int = 5
 
+    # Slice 15 — CORS allowlist for the Vite dashboard. Comma-separated
+    # origins (no trailing slash). Leave blank to disable CORS entirely
+    # (no middleware mounted). Local default targets Vite's dev port;
+    # production should set this to the deployed dashboard host.
+    dashboard_origins: str = "http://localhost:5173"
+
+    @property
+    def dashboard_origins_list(self) -> list[str]:
+        return [o.strip() for o in self.dashboard_origins.split(",") if o.strip()]
+
     @property
     def national_emergency_number_list(self) -> list[str]:
         return [n.strip() for n in self.national_emergency_numbers.split(",") if n.strip()]
